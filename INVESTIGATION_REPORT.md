@@ -250,7 +250,144 @@ navigableDomElement の shortcutRegistry にマッチ
 
 ---
 
-## 顧客との妥協案
+## PCI 側での対策（TAOコア変更なし）
+
+### 前提: イベント伝播の構造
+
+```
+DOM ツリー（上が外側）:
+┌──────────────────────────────────────────────────────┐
+│ .qti-item  (テストランナー管理)                        │
+│  ┌──────────────────────────────────────────────────┐ │
+│  │ .qti-interaction.qti-customInteraction           │ │
+│  │  ← navigableDomElement がここに shortcutRegistry  │ │
+│  │    を登録 (addEventListener 'keydown', bubble)    │ │
+│  │  ┌──────────────────────────────────────────────┐│ │
+│  │  │ PCI ルート要素 (pci:markup の root)           ││ │
+│  │  │  ┌──────────────────────────────────────────┐││ │
+│  │  │  │ カスタム入力要素                          │││ │
+│  │  │  │ (contenteditable, canvas, etc.)          │││ │
+│  │  │  │  ← ユーザーがここで矢印キーを押す         │││ │
+│  │  │  └──────────────────────────────────────────┘││ │
+│  │  └──────────────────────────────────────────────┘│ │
+│  └──────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────┘
+
+keydown イベントの伝播:
+  Capture:  window → .qti-item → .qti-interaction → PCI root → 入力要素
+  Target:   入力要素
+  Bubble:   入力要素 → PCI root → .qti-interaction(★ここでTAOが横取り) → .qti-item → window
+```
+
+TAO の `shortcutRegistry` は `addEventListener(eventName, listener, false)`（**bubble フェーズ**）で `.qti-interaction` に登録される。PCI ルート要素は `.qti-interaction` の**内側**にあるため、**PCI 側でバブリングを止めれば TAO のハンドラに到達しない。**
+
+---
+
+### PCI対策A（推奨）: PCI の `initialize()` で矢印キーの `stopPropagation` を実装
+
+```javascript
+// PCI の initialize() メソッド内
+initialize(id, dom, config, state) {
+    // PCI のルート要素で keydown を捕捉し、
+    // IMEコンポジション中または矢印キーの場合はTAOへの伝播を阻止
+    dom.addEventListener('keydown', function(event) {
+        // IMEコンポジション中: 全キーをTAOに渡さない
+        if (event.isComposing || event.keyCode === 229) {
+            event.stopPropagation();
+            return;
+        }
+        // 矢印キー: PCI内のカーソル操作を優先
+        const arrowKeys = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
+        if (arrowKeys.includes(event.key)) {
+            event.stopPropagation();
+            // ※ preventDefault() は呼ばない（ネイティブ動作を維持）
+        }
+    }, false);  // bubble フェーズ（capture でも可）
+
+    // ... PCI本来の初期化処理 ...
+}
+```
+
+**なぜこれが動作するか:**
+
+1. PCI ルート要素 (`dom`) は `.qti-interaction` の**内側**にある
+2. バブリング時、イベントは PCI root → `.qti-interaction` の順に到達
+3. PCI root で `stopPropagation()` を呼ぶと `.qti-interaction` に到達しない
+4. TAO の `navigableDomElement` ハンドラが発火しない
+5. `preventDefault()` を呼ばないのでネイティブ動作（IMEカーソル移動等）は維持
+
+**メリット:**
+- TAO のコード変更が一切不要
+- PCI の `initialize()` に数行追加するだけ
+- PCI 内では矢印キーが完全に自由に使える
+- PCI 外のkeyNavigation アクセシビリティ機能には一切影響しない
+- IME の有無に関わらず動作する
+
+**デメリット:**
+- PCI 内では TAO のキーボードナビゲーション機能が無効になる
+- PCI 開発者が個別に実装する必要がある（TAO 全体の自動修正ではない）
+- PCI 内から Tab/Shift+Tab でテストランナーUIに戻る操作も影響を受ける可能性あり（矢印キーのみに限定すれば回避可）
+
+---
+
+### PCI対策B: CSS クラス `no-key-navigation` の付与
+
+```javascript
+// PCI の initialize() メソッド内
+initialize(id, dom, config, state) {
+    dom.classList.add('no-key-navigation');
+    // ... PCI本来の初期化処理 ...
+}
+```
+
+TAO の `allowedToNavigateFrom()` 関数は `no-key-navigation` クラスを持つ要素からのナビゲーションをブロックする。
+
+**効果の範囲:**
+- Tab/Shift+Tab によるグループ間移動 → **ブロックされる** (helpers.js の `allowedToNavigateFrom` チェック)
+- 矢印キーによるアイテム間移動 → **ブロックされる** (setupItemsNavigator のチェック)
+- **ただし `stopPropagation()` と `preventDefault()` は依然として呼ばれる**
+
+```
+no-key-navigation が防ぐもの:
+  ✓ keyNavigation のフォーカス移動アクション（next/previous）
+  ✗ event.stopPropagation()  ← processShortcut()で先に実行される
+  ✗ event.preventDefault()   ← navigableDomElement のハンドラで実行される
+```
+
+**結論: `no-key-navigation` だけでは不十分。** ナビゲーションアクション自体は止まるが、`stopPropagation()` と `preventDefault()` がハンドラ/オプション処理で先に実行されるため、ネイティブ動作（IMEカーソル移動）も同時にブロックされる。
+
+---
+
+### PCI対策C: CSS クラス `key-navigation-scrollable` の付与
+
+```javascript
+// PCI 内の入力要素に付与
+inputElement.classList.add('key-navigation-scrollable');
+```
+
+**効果の範囲:**
+- `preventDefault()` → **回避される**（scrollable チェックで除外）
+- `stopPropagation()` → **依然として呼ばれる**（オプションレベル）
+- `keyboard(key, target)` → **依然として呼ばれる**（ナビゲーションが実行される）
+
+**結論: `key-navigation-scrollable` だけでも不十分。** `preventDefault()` は回避できるが、`stopPropagation()` でイベント伝播が止まり、`keyboard()` でフォーカスが移動してしまう。
+
+---
+
+### PCI対策の比較
+
+| 対策 | TAO変更 | preventDefault回避 | stopPropagation回避 | ナビゲーション停止 | IME対応 |
+|---|---|---|---|---|---|
+| **A: PCI内stopPropagation（推奨）** | 不要 | **✓** | **✓** | **✓** | **✓** |
+| B: no-key-navigation | 不要 | ✗ | ✗ | ✓ | ✗ |
+| C: key-navigation-scrollable | 不要 | ✓ | ✗ | ✗ | ✗ |
+| B+C: 両方の組み合わせ | 不要 | ✓ | ✗ | ✓ | △ |
+
+**PCI対策Aが唯一の完全な解決策。** イベントがTAOのハンドラに到達する前に止めるため、TAO側の全ての問題（`preventDefault`, `stopPropagation`, `keyboard()`, `isInput()` の狭い判定）を一括で回避できる。
+
+---
+
+## 顧客との妥協案（TAOコア変更を伴う案）
 
 ### 妥協案1（推奨・最小リスク）: `registry.js` に IME コンポジションガードを追加
 
@@ -417,7 +554,11 @@ function processShortcut(event, descriptor) {
 | ★☆☆ | 妥協案4: プラグイン無効化 | PHP設定 | 低 | 即効性あり（暫定対応） |
 | ☆☆☆ | 妥協案5: stopPropagationタイミング変更 | `registry.js` | 高 | 根本的だが回帰リスク大 |
 
-**短期対応として妥協案4（プラグイン無効化）を実施し、中期的に妥協案3（IMEガード + isInput拡大）を実装する**ことを推奨する。
+### 推奨アプローチ
+
+**即時対応:** PCI対策A（PCI内 `stopPropagation`）を自社PCI に実装する。TAO変更不要で即座に適用可能。
+
+**TAO側の改善要望として:** 妥協案1（IMEコンポジションガード）を TAO 開発元に提案する。MDN公式推奨パターンであり、2行の変更で全PCI・全IMEに対して根本解決できる。
 
 ---
 
