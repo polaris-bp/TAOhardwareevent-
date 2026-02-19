@@ -204,13 +204,103 @@ const shortcuts = shortcutRegistry($element);  // $element は jQuery オブジ�
 
 ---
 
-## 結論
+## 重要な追加調査: `allow-shortcuts: false` 設定との関係
+
+### 調査結果: ショートカット無効化は矢印キー問題を解決しない
+
+`testRunner.conf.php` の `allow-shortcuts` 設定と `keyNavigation` プラグインの関係を詳細に調査した結果、**ショートカットを無効化しても矢印キーの問題は発生し続ける**ことが判明した。
+
+#### 根拠: `allowShortcuts` チェックの有無の比較
+
+**ナビゲーション・ツール系プラグイン（チェックあり）:**
+
+`next.js`, `previous.js`, `calculator.js` 等のプラグインは、ショートカット登録前に `allowShortcuts` を必ずチェックしている：
+
+```javascript
+// next.js - ショートカット登録前に allowShortcuts をチェック
+const registerShortcut = kbdShortcut => {
+    if (testRunnerOptions.allowShortcuts && kbdShortcut) {   // ← チェックあり
+        shortcut.add(
+            namespaceHelper.namespaceAll(kbdShortcut, this.getName(), true),
+            () => {
+                if (this.getState('enabled') === true) {
+                    testRunner.trigger('nav-next', true);
+                }
+            },
+            { avoidInput: true, prevent: true }
+        );
+    }
+};
+```
+
+`allow-shortcuts: false` の場合、`J`, `K`, `C`, `I`, `O` 等のグローバルショートカットは登録されない。
+
+**keyNavigation プラグイン（チェックなし）:**
+
+```javascript
+// plugin.js - allowShortcuts チェックが一切ない
+export default pluginFactory({
+    name: 'keyNavigation',
+    init() {
+        const testRunner = this.getTestRunner();
+        const pluginConfig = _.defaults(this.getConfig(), defaultPluginConfig);
+        const keyNavigator = keyNavigatorFactory(testRunner, pluginConfig);
+
+        testRunner
+            .after('renderitem', () => {
+                if (keyNavigator.isActive()) {
+                    keyNavigator.destroy();
+                }
+                keyNavigator.init();   // ← 常に初期化される
+            })
+            // ...
+    }
+});
+```
+
+```javascript
+// keyNavigation.js - allowShortcuts チェックなしでショートカット登録
+shortcut
+    .remove(eventNS)
+    .add(`tab${eventNS} shift+tab${eventNS}`, function (e) {   // ← 常に登録
+        if (!allowedToNavigateFrom(e.target)) {
+            return false;
+        }
+        if (!groupNavigator.isFocused()) {
+            groupNavigator.focus();
+        }
+    });
+```
+
+#### 影響の整理
+
+| 設定 | ナビゲーション/ツール系<br>(J, K, C等) | keyNavigation Tab/Shift+Tab | keyNavigation 矢印キー |
+|---|---|---|---|
+| `allow-shortcuts: true` | 有効 | 有効 | 有効（インターセプトあり） |
+| `allow-shortcuts: false` | **無効** | **依然として有効** | **依然として有効（インターセプトあり）** |
+
+#### なぜこうなっているか
+
+- `keyNavigation` プラグインは `content` カテゴリのアクセシビリティプラグインとして設計されている
+- ショートカット系プラグイン（`navigation`, `tools` カテゴリ）とは独立した設計
+- `allow-shortcuts` 設定は `navigation`/`tools` 系プラグインのみが参照しており、`content` 系プラグインには適用されない
+- `keyNavigation` が使用するグローバルショートカット（Tab/Shift+Tab）は `shortcut.add()` を直接呼び出しており、`allowShortcuts` フラグを経由しない
+- `navigableDomElement` の矢印キーハンドラは要素レベルの独自 `shortcutRegistry` インスタンスで動作し、グローバルの `allow-shortcuts` 設定とは完全に独立
+
+#### 結論
+
+**`allow-shortcuts: false` に設定しても、`keyNavigation` プラグインは影響を受けず、矢印キーのインターセプトは継続する。** これは設計上の問題であり、`keyNavigation` プラグインが `allowShortcuts` 設定を無視していることが根本的な原因の一つである。
+
+---
+
+## 総合結論
 
 矢印キーのハードウェアキーイベントが効かない主な原因は以下の通り：
 
 1. **`navigableDomElement.js` が矢印キーイベントを完全にインターセプトし、`preventDefault()` と `stopPropagation()` で消費している** — これが最も直接的な原因
 2. **矢印キーがプラグインのUI間ナビゲーションに使用され、QTIアイテム内のコンテンツ操作に転送されない** — ユーザーが期待する動作（ラジオボタン選択等）ができない
 3. **フォーカス管理の問題により、Tabキーでナビゲーターを有効化するまで矢印キーが機能しない状態が発生する** — 特にアイテム切り替え直後
+4. **`keyNavigation` プラグインが `allow-shortcuts` 設定を無視している** — ショートカット無効化でも矢印キーのインターセプトが継続する
 
 ---
 
@@ -235,7 +325,33 @@ QTIアイテムのコンテンツ領域に `key-navigation-scrollable` クラス
 
 `defaultMode.js` の設定で、矢印キーをプラグインナビゲーションから外し、QTIコンテンツ操作に使えるようにする。例：`keyNextItem`/`keyPrevItem` を `Tab`/`Shift+Tab` のみに変更。
 
-### 修正案D: `getActualKey()` の改善
+### 修正案D: `keyNavigation` プラグインに `allowShortcuts` チェックを追加
+
+`plugin.js` で `allowShortcuts` 設定を参照し、ショートカットが無効の場合はプラグインを初期化しないようにする。
+
+```javascript
+// 修正例: plugin.js
+init() {
+    const testRunner = this.getTestRunner();
+    const testRunnerOptions = testRunner.getOptions();
+    const pluginConfig = _.defaults(this.getConfig(), defaultPluginConfig);
+    const keyNavigator = keyNavigatorFactory(testRunner, pluginConfig);
+
+    testRunner
+        .after('renderitem', () => {
+            if (!testRunnerOptions.allowShortcuts) {
+                return;  // ← ショートカット無効時はスキップ
+            }
+            if (keyNavigator.isActive()) {
+                keyNavigator.destroy();
+            }
+            keyNavigator.init();
+        })
+        // ...
+}
+```
+
+### 修正案E: `getActualKey()` の改善
 
 `event.key` を優先的に使用するよう `getActualKey()` を修正し、非推奨の `event.which`/`event.keyCode` への依存を減らす。
 
