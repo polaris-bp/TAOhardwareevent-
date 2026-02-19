@@ -283,50 +283,154 @@ TAO の `shortcutRegistry` は `addEventListener(eventName, listener, false)`（
 
 ---
 
-### PCI対策A（推奨）: PCI の `initialize()` で矢印キーの `stopPropagation` を実装
+### PCI対策A（推奨）: 自社IME と PCI の `stopPropagation` を組み合わせた実装
+
+#### イベント処理の全体フロー
+
+```
+ハードウェアキーボードで矢印キーを押下
+    │
+    ▼
+ブラウザが keydown を発火（target: IME入力要素）
+    │
+    ▼  Bubble フェーズ（内→外の順に発火）
+    │
+    ├─① IME入力要素のハンドラ（自社IME）
+    │   └─ IMEコンポジション中ならカーソル移動を処理
+    │      └─ event.preventDefault() でネイティブ動作を上書き
+    │      （※ stopPropagation は呼ばなくてよい）
+    │
+    ├─② PCI root のハンドラ（ガード）
+    │   └─ event.stopPropagation() で TAO への伝播を遮断
+    │
+    ╳── ここで伝播が止まる ──╳
+    │
+    ├─③ .qti-interaction のハンドラ（TAO navigableDomElement）
+    │   └─ ★ 到達しない
+    :
+```
+
+**ポイント:** `stopPropagation()` は上位要素への伝播を止めるが、**同一要素・子要素のリスナーには影響しない**。そのため IME ハンドラ（①）と PCI ガード（②）を別の階層に配置すれば、互いに干渉せず共存できる。
+
+#### 実装コード
 
 ```javascript
-// PCI の initialize() メソッド内
+// =============================================================
+// PCI の initialize() メソッド
+// =============================================================
 initialize(id, dom, config, state) {
-    // PCI のルート要素で keydown を捕捉し、
-    // IMEコンポジション中または矢印キーの場合はTAOへの伝播を阻止
+
+    // --- IME入力要素の作成 ---
+    const imeInput = document.createElement('div');
+    imeInput.setAttribute('contenteditable', 'true');
+    imeInput.className = 'my-ime-input';
+    dom.appendChild(imeInput);
+
+    // ---------------------------------------------------------
+    // ① 自社IME のキーハンドラ（入力要素に登録）
+    //    IMEが矢印キーイベントを消化する
+    // ---------------------------------------------------------
+    let isComposing = false;
+
+    imeInput.addEventListener('compositionstart', function() {
+        isComposing = true;
+    });
+    imeInput.addEventListener('compositionend', function() {
+        isComposing = false;
+    });
+
+    imeInput.addEventListener('keydown', function(event) {
+        // IMEコンポジション中の矢印キー → IMEが消化
+        if (isComposing || event.isComposing || event.keyCode === 229) {
+            const arrowKeys = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
+            if (arrowKeys.includes(event.key)) {
+                // IME独自のカーソル移動処理
+                handleIMECursorMove(event.key);
+                event.preventDefault();   // ネイティブ動作を上書き
+                // ※ stopPropagation は不要（②で止める）
+                return;
+            }
+        }
+        // IME非コンポジション中の矢印キー → PCI内のカーソル移動
+        // （必要に応じてここにも処理を追加可能）
+    });
+
+    // ---------------------------------------------------------
+    // ② PCI root のガードハンドラ
+    //    TAO の keyNavigation への伝播を遮断
+    // ---------------------------------------------------------
     dom.addEventListener('keydown', function(event) {
-        // IMEコンポジション中: 全キーをTAOに渡さない
+        // IMEコンポジション中: 全キーイベントをTAOに渡さない
         if (event.isComposing || event.keyCode === 229) {
             event.stopPropagation();
             return;
         }
-        // 矢印キー: PCI内のカーソル操作を優先
+        // 矢印キー: PCI内の操作を優先（TAOに渡さない）
         const arrowKeys = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
         if (arrowKeys.includes(event.key)) {
             event.stopPropagation();
-            // ※ preventDefault() は呼ばない（ネイティブ動作を維持）
+            // ※ preventDefault() は呼ばない
+            //    → IME非コンポジション時はネイティブカーソル移動を維持
         }
-    }, false);  // bubble フェーズ（capture でも可）
+    }, false);
 
     // ... PCI本来の初期化処理 ...
 }
+
+function handleIMECursorMove(key) {
+    // 自社IMEのカーソル移動ロジック
+    switch (key) {
+        case 'ArrowLeft':  /* 変換候補内で左移動 */ break;
+        case 'ArrowRight': /* 変換候補内で右移動 */ break;
+        case 'ArrowUp':    /* 候補リスト上移動 */   break;
+        case 'ArrowDown':  /* 候補リスト下移動 */   break;
+    }
+}
 ```
 
-**なぜこれが動作するか:**
+#### なぜ ① と ② が干渉しないか
 
-1. PCI ルート要素 (`dom`) は `.qti-interaction` の**内側**にある
-2. バブリング時、イベントは PCI root → `.qti-interaction` の順に到達
-3. PCI root で `stopPropagation()` を呼ぶと `.qti-interaction` に到達しない
-4. TAO の `navigableDomElement` ハンドラが発火しない
-5. `preventDefault()` を呼ばないのでネイティブ動作（IMEカーソル移動等）は維持
+```
+bubble フェーズの発火順:
+
+  imeInput (①)  →  dom/PCI root (②)  →  .qti-interaction (③ TAO)
+     ↑                    ↑                      ↑
+  IMEが処理         stopPropagation()         到達しない
+  preventDefault()    ここで伝播停止
+```
+
+| 操作 | ①の動作 | ②の動作 | ③ TAO |
+|---|---|---|---|
+| IME中 + 矢印 | IMEがカーソル移動 + `preventDefault` | `stopPropagation` | 到達しない |
+| IME中 + 矢印以外 | IMEが処理 | `stopPropagation` | 到達しない |
+| IME外 + 矢印 | スルー | `stopPropagation` | 到達しない |
+| IME外 + Tab等 | スルー | スルー | TAOが処理 ✓ |
+
+**3つの防御層:**
+1. **自社IME** (①): コンポジション中の矢印キーを消化し、独自カーソル移動を実行
+2. **PCI ガード** (②): 矢印キー全般をTAOから隔離
+3. **TAO** (③): Tab/Shift+Tab等、矢印キー以外は通常通り処理
+
+#### `compositionstart`/`compositionend` の自前追跡が必要な理由
+
+`event.isComposing` と `event.keyCode === 229` だけでは不十分なケースがある:
+
+- **`compositionstart` の前の最初の `keydown`**: `isComposing` はまだ `false` だが `keyCode` は `229`
+- **`compositionend` の後の最後の `keydown`**: Chrome は `compositionend` 後に疑似 `keydown` を発火し、`isComposing` が `false` になっている場合がある
+- **自社IMEが独自のコンポジション管理をする場合**: ブラウザの `compositionstart`/`compositionend` とタイミングがずれる可能性
+
+そのため、①で `compositionstart`/`compositionend` を**自前で追跡**(`isComposing` フラグ) しつつ、②では `event.isComposing || event.keyCode === 229` をフォールバックとして使用する二重ガードが安全。
 
 **メリット:**
 - TAO のコード変更が一切不要
-- PCI の `initialize()` に数行追加するだけ
-- PCI 内では矢印キーが完全に自由に使える
-- PCI 外のkeyNavigation アクセシビリティ機能には一切影響しない
-- IME の有無に関わらず動作する
+- 自社IMEが矢印キーイベントを完全にコントロールできる
+- IMEコンポジション中もIME外も、PCI内の矢印キーが正しく動作
+- PCI 外の TAO キーボードナビゲーション機能には一切影響しない
+- Tab/Shift+Tab はガードを通過するため、PCI↔テストランナーUI間の移動も維持
 
 **デメリット:**
-- PCI 内では TAO のキーボードナビゲーション機能が無効になる
-- PCI 開発者が個別に実装する必要がある（TAO 全体の自動修正ではない）
-- PCI 内から Tab/Shift+Tab でテストランナーUIに戻る操作も影響を受ける可能性あり（矢印キーのみに限定すれば回避可）
+- PCI 内では TAO のキーボードナビゲーション（矢印キー）機能が無効になる
+- PCI 開発者が個別に実装する必要がある
 
 ---
 
