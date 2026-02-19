@@ -8,12 +8,14 @@ TAO (Testing Assisté par Ordinateur) CBTシステムの受験画面（テスト
 
 | リポジトリ | ファイル | 役割 |
 |---|---|---|
+| `tao-core-sdk-fe` | `src/util/shortcut/registry.js` | ショートカットキー登録・検出基盤 |
+| `tao-core-ui-fe` | `src/keyNavigation/navigableDomElement.js` | DOM要素レベルのキーイベント処理 |
 | `tao-test-runner-qti-fe` | `src/plugins/content/accessibility/keyNavigation/plugin.js` | キーナビゲーションプラグイン本体 |
 | `tao-test-runner-qti-fe` | `src/plugins/content/accessibility/keyNavigation/keyNavigation.js` | キーナビゲーション制御ロジック |
+| `tao-test-runner-qti-fe` | `src/plugins/content/accessibility/keyNavigation/helpers.js` | ナビゲーション判定ヘルパー |
 | `tao-test-runner-qti-fe` | `src/plugins/content/accessibility/keyNavigation/modes/defaultMode.js` | デフォルトモードキー設定 |
+| `tao-test-runner-qti-fe` | `src/plugins/content/accessibility/keyNavigation/strategies/itemNavigation.js` | アイテム内ナビゲーション戦略 |
 | `tao-test-runner-qti-fe` | `src/plugins/navigation/next.js` | 次問題ナビゲーション（allowShortcutsチェック参照用） |
-| `tao-core-ui-fe` | `src/keyNavigation/navigableDomElement.js` | DOM要素レベルのキーイベント処理 |
-| `tao-core-sdk-fe` | `src/util/shortcut/registry.js` | ショートカットキー登録・検出基盤 |
 | `extension-tao-testqti` | `config/default/testRunner.conf.php` | テストランナー設定 |
 
 ---
@@ -55,6 +57,20 @@ eventTarget.addEventListener("keydown", (event) => {
 
 #### IME コンポジション中の矢印キーで何が起こるか
 
+`getActualKey` 関数は `event.which || event.keyCode` を使ってキーコードを取得し、`specialKeys` マップを優先して参照する：
+
+```javascript
+function getActualKey(event) {
+    const code = event.which || event.keyCode;
+    const character = code >= 32 ? String.fromCharCode(code).toLowerCase() : '';
+    let key = event.key && event.key.toLowerCase();
+    // ... event.code によるキー名補正ロジック ...
+    return specialKeys[code] || key || character;
+}
+```
+
+この挙動により、IMEコンポジション中の矢印キーの処理が分岐する：
+
 ```
 IMEコンポジション中にユーザーが矢印キーを押す
         │
@@ -62,14 +78,20 @@ IMEコンポジション中にユーザーが矢印キーを押す
 ブラウザが keydown イベントを発火
         │
         ├─ ケースA: ブラウザが keyCode=229 を設定する場合
-        │   └─ getActualKey() → specialKeys[229] = undefined
-        │     └─ event.key = 'Process' → key = 'process'
-        │       └─ 'process' にマッチするショートカットなし → スルー
-        │         └─ IMEのカーソル移動が動作する ✓
+        │   └─ getActualKey():
+        │       code = 229
+        │       specialKeys[229] = undefined（マップに存在しない）
+        │       event.key = 'Process' → key = 'process'
+        │       return: undefined || 'process' = 'process'
+        │     └─ 'process' にマッチするショートカットなし → スルー
+        │       └─ IMEのカーソル移動が動作する ✓
         │
         └─ ケースB: ブラウザが実際の keyCode(37-40) を設定する場合
-            └─ getActualKey() → specialKeys[37] = 'left' 等
-              └─ ショートカットにマッチ
+            └─ getActualKey():
+                code = 37
+                specialKeys[37] = 'left'
+                return: 'left'（specialKeysが最優先で返される）
+              └─ ショートカット 'left' にマッチ
                 └─ event.stopPropagation() が呼ばれる
                   └─ event.preventDefault() が呼ばれる可能性
                     └─ ★ IMEのカーソル移動がブロックされる ✗
@@ -88,6 +110,8 @@ IMEコンポジション中にユーザーが矢印キーを押す
 ---
 
 ### 原因2（直接原因）: `navigableDomElement.js` の `isInput()` が PCI のカスタム要素を認識しない
+
+`tao-core-ui-fe/src/keyNavigation/navigableDomElement.js` の矢印キーハンドラ内：
 
 ```javascript
 const isInput = $el => $el.is(':text,textarea');
@@ -130,37 +154,53 @@ PCI (Portable Custom Interaction) は任意のHTML5マークアップを内部�
 
 ### 原因3: `stopPropagation()` がハンドラ実行前に呼ばれる
 
-`registry.js` の `processShortcut` 関数：
+`registry.js` の `processShortcut` 関数の実際のコード：
 
 ```javascript
 function processShortcut(event, descriptor) {
     const command = normalizeCommand(descriptor);
     const shortcut = shortcuts[command];
+
     if (shortcut && !states.disabled) {
-        // avoidInput チェック（[type="text"],textarea のみ）
+        // [1] avoidInput チェック（ここで return すれば以降は実行されない）
+        if (shortcut.options.avoidInput === true) {
+            const $target = $(event.target);
+            if ($target.closest('[type="text"],textarea').length) {
+                if (!shortcut.options.allowIn || !$target.closest(shortcut.options.allowIn).length) {
+                    return;  // input/textarea 内ではショートカットを無視
+                }
+            }
+        }
+        // [2] stopPropagation（avoidInput を通過した場合、ハンドラ実行前に呼ばれる）
         if (shortcut.options.propagate === false) {
-            event.stopPropagation();      // ← ハンドラ実行前に呼ばれる
+            event.stopPropagation();
         }
+        // [3] preventDefault（同様にハンドラ実行前）
         if (shortcut.options.prevent === true) {
-            event.preventDefault();       // ← ハンドラ実行前に呼ばれる
+            event.preventDefault();
         }
-        // ここでハンドラが実行される
-        _.forEach(shortcutHandlers, function (handler) {
-            handler(event, command);
-        });
+        // [4] ハンドラの実行
+        const shortcutHandlers = getCommandHandlers(command);
+        if (shortcutHandlers) {
+            _.forEach(shortcutHandlers, function (handler) {
+                handler(event, command);
+            });
+        }
     }
 }
 ```
 
-`navigableDomElement.js` で矢印キーは `{ propagate: false }` で登録されている。
+矢印キーは `navigableDomElement.js` で `{ propagate: false }` で登録されている（`avoidInput` は設定されていない）。
 
-**重要:** `stopPropagation()` は `processShortcut` のオプション処理段階で呼ばれ、ハンドラ内の `isInput()` チェックより**先**に実行される。つまり：
+**重要:** `stopPropagation()` は `processShortcut` の [2] の段階で呼ばれ、ハンドラ内の `isInput()` チェック [4] より**先**に実行される。つまり：
 
 ```
 keydown イベント発生
   → processShortcut() 呼び出し
-    → event.stopPropagation()      ← ここで伝播が止まる（isInput判定の前）
-      → handler() 実行
+    → [1] avoidInput: 矢印キーには設定なし → スキップ
+    → [2] event.stopPropagation()      ← ここで伝播が止まる（isInput判定の前）
+    → [3] prevent: 矢印キーには設定なし → スキップ
+    → [4] handler() 実行
         → isInput() が true でも、stopPropagation は既に呼ばれた後
 ```
 
@@ -170,26 +210,53 @@ keydown イベント発生
 
 ### 原因4: `keyNavigation` プラグインが `allow-shortcuts` 設定を無視
 
-ナビゲーション・ツール系プラグインは `allowShortcuts` をチェックする：
+ナビゲーション・ツール系プラグインは `allowShortcuts` をチェックしてからショートカットを登録する：
 
 ```javascript
-// next.js - チェックあり
-if (testRunnerOptions.allowShortcuts && kbdShortcut) {
-    shortcut.add(/* ... */);
-}
+// next.js - allowShortcuts チェックあり
+const registerShortcut = kbdShortcut => {
+    if (testRunnerOptions.allowShortcuts && kbdShortcut) {
+        shortcut.add(
+            namespaceHelper.namespaceAll(kbdShortcut, this.getName(), true),
+            () => { /* ... */ },
+            { avoidInput: true, prevent: true }
+        );
+    }
+};
 ```
 
-`keyNavigation` プラグインはチェックしない：
+`keyNavigation` プラグインはショートカット登録時に `allowShortcuts` をチェックしない：
 
 ```javascript
-// plugin.js - チェックなし
-testRunner.after('renderitem', () => {
-    keyNavigator.init();  // ← 常に初期化
-});
-
-// keyNavigation.js - チェックなし
-shortcut.add(`tab shift+tab`, function (e) { /* ... */ });  // ← 常に登録
+// plugin.js - allowShortcuts チェックなし
+testRunner
+    .after('renderitem', () => {
+        if (keyNavigator.isActive()) {
+            keyNavigator.destroy();  // 重複防止のための破棄
+        }
+        keyNavigator.init();  // ← allowShortcuts に関係なく常に初期化
+    })
+    .on('unloaditem', () => {
+        keyNavigator.destroy();
+    });
 ```
+
+```javascript
+// keyNavigation.js - init() 内のグローバルショートカット登録
+// allowShortcuts チェックなし、ただし allowedToNavigateFrom による実行時ガードはある
+shortcut
+    .remove(eventNS)
+    .add(`tab${eventNS} shift+tab${eventNS}`, function (e) {
+        if (!allowedToNavigateFrom(e.target)) {
+            return false;  // no-key-navigation クラスがある要素からは無視
+        }
+        if (!groupNavigator.isFocused()) {
+            groupNavigator.focus();
+        }
+    });
+```
+
+**注意:** `keyNavigation.js` はハンドラ内で `allowedToNavigateFrom()` をチェックしているが、これは `no-key-navigation` CSSクラスの有無を判定するものであり、`allow-shortcuts` 設定とは無関係。ショートカットの**登録自体**は常に行われる。
 
 | 設定 | J/K/C等 | keyNavigation Tab | keyNavigation 矢印キー |
 |---|---|---|---|
@@ -202,19 +269,23 @@ shortcut.add(`tab shift+tab`, function (e) { /* ... */ });  // ← 常に登録
 
 ### 原因5: `avoidInput` オプションの判定範囲が狭い
 
-グローバルショートカット（Tab等）が使用する `avoidInput` 判定：
+`registry.js` の `processShortcut` 内で使用される `avoidInput` 判定：
 
 ```javascript
 if (shortcut.options.avoidInput === true) {
     const $target = $(event.target);
     if ($target.closest('[type="text"],textarea').length) {
-        // input/textarea 内ではショートカットを無視
-        return;
+        // allowIn オプション: 特定CSSクラス内では avoidInput を無視する例外指定
+        if (!shortcut.options.allowIn || !$target.closest(shortcut.options.allowIn).length) {
+            return;  // input/textarea 内ではショートカットを無視
+        }
     }
 }
 ```
 
 この判定も `[type="text"],textarea` のみで、`contenteditable` やカスタムPCI要素はカバーされない。
+
+**ただし、矢印キーに対する直接的な影響はない:** `navigableDomElement.js` で矢印キーを登録する際に `avoidInput` オプションは設定されていないため、この判定は矢印キーのショートカット処理では実行されない。影響があるのは `avoidInput: true` で登録された他のショートカット（例: `next.js` の次問題ショートカット）に限定される。
 
 ---
 
@@ -237,6 +308,7 @@ if (shortcut.options.avoidInput === true) {
 navigableDomElement の shortcutRegistry にマッチ
         │
         ├─ processShortcut():
+        │   ├─ avoidInput: 矢印キーには未設定 → スキップ
         │   ├─ event.stopPropagation()  ← ハンドラ前に実行（欠陥③）
         │   └─ handler 呼び出し:
         │       ├─ isInput($target) → false  ← contenteditable未対応（欠陥②）
@@ -254,14 +326,16 @@ navigableDomElement の shortcutRegistry にマッチ
 
 ### 前提: イベント伝播の構造
 
+`itemNavigation.js` はアイテム内の `.qti-interaction` 要素を検出し、内部の `:input` 要素や `.key-navigation-focusable` 要素を `navigableDomElement` でラップする。PCI（`.qti-customInteraction`）が標準の `:input` 要素を含んでいる場合や、`key-navigation-focusable` クラスを持つ場合に、`navigableDomElement` の `shortcutRegistry`（`addEventListener('keydown', ..., false)` でバブルフェーズに登録）がPCI内部のキーイベントをインターセプトする。
+
 ```
 DOM ツリー（上が外側）:
 ┌──────────────────────────────────────────────────────┐
 │ .qti-item  (テストランナー管理)                        │
 │  ┌──────────────────────────────────────────────────┐ │
 │  │ .qti-interaction.qti-customInteraction           │ │
-│  │  ← navigableDomElement がここに shortcutRegistry  │ │
-│  │    を登録 (addEventListener 'keydown', bubble)    │ │
+│  │  ← navigableDomElement の shortcutRegistry が     │ │
+│  │    この要素またはその子要素に keydown リスナーを登録 │ │
 │  │  ┌──────────────────────────────────────────────┐│ │
 │  │  │ PCI ルート要素 (pci:markup の root)           ││ │
 │  │  │  ┌──────────────────────────────────────────┐││ │
@@ -279,7 +353,7 @@ keydown イベントの伝播:
   Bubble:   入力要素 → PCI root → .qti-interaction(★ここでTAOが横取り) → .qti-item → window
 ```
 
-TAO の `shortcutRegistry` は `addEventListener(eventName, listener, false)`（**bubble フェーズ**）で `.qti-interaction` に登録される。PCI ルート要素は `.qti-interaction` の**内側**にあるため、**PCI 側でバブリングを止めれば TAO のハンドラに到達しない。**
+TAO の `shortcutRegistry` は `addEventListener(eventName, listener, false)`（**bubble フェーズ**）でDOM要素に登録される。PCI ルート要素はその**内側**にあるため、**PCI 側でバブリングを止めれば TAO のハンドラに到達しない。**
 
 ---
 
@@ -305,7 +379,7 @@ TAO の `shortcutRegistry` は `addEventListener(eventName, listener, false)`（
     │
     ╳── ここで伝播が止まる ──╳
     │
-    ├─③ .qti-interaction のハンドラ（TAO navigableDomElement）
+    ├─③ TAO の shortcutRegistry ハンドラ
     │   └─ ★ 到達しない
     :
 ```
@@ -393,7 +467,7 @@ function handleIMECursorMove(key) {
 ```
 bubble フェーズの発火順:
 
-  imeInput (①)  →  dom/PCI root (②)  →  .qti-interaction (③ TAO)
+  imeInput (①)  →  dom/PCI root (②)  →  TAO の shortcutRegistry (③)
      ↑                    ↑                      ↑
   IMEが処理         stopPropagation()         到達しない
   preventDefault()    ここで伝播停止
@@ -444,16 +518,39 @@ initialize(id, dom, config, state) {
 }
 ```
 
-TAO の `allowedToNavigateFrom()` 関数は `no-key-navigation` クラスを持つ要素からのナビゲーションをブロックする。
+TAO の `allowedToNavigateFrom()` 関数（`helpers.js`）は `no-key-navigation` クラスを持つ要素**およびその子孫要素**からのナビゲーションをブロックする：
+
+```javascript
+const ignoredClass = 'no-key-navigation';
+
+export function allowedToNavigateFrom(from) {
+    let element = from;
+    // keyNavigator や navigable オブジェクトから DOM 要素を取得
+    if (element && 'function' === typeof element.getCursor) {
+        const {navigable} = element.getCursor();
+        element = navigable;
+    }
+    if (element && 'function' === typeof element.getElement) {
+        element = element.getElement();
+    }
+    const $element = $(element);
+
+    // 要素自体、または祖先要素に no-key-navigation があればブロック
+    if ($element.hasClass(ignoredClass) || $element.parents(`.${ignoredClass}`).length > 0) {
+        return false;
+    }
+    return true;
+}
+```
 
 **効果の範囲:**
-- Tab/Shift+Tab によるグループ間移動 → **ブロックされる** (helpers.js の `allowedToNavigateFrom` チェック)
-- 矢印キーによるアイテム間移動 → **ブロックされる** (setupItemsNavigator のチェック)
+- Tab/Shift+Tab によるグループ間移動 → **ブロックされる** (`keyNavigation.js` の Tab ハンドラ内の `allowedToNavigateFrom` チェック)
+- 矢印キーによるアイテム間移動 → **ブロックされる** (`setupItemsNavigator` の `allowedToNavigateFrom` チェック)
 - **ただし `stopPropagation()` と `preventDefault()` は依然として呼ばれる**
 
 ```
 no-key-navigation が防ぐもの:
-  ✓ keyNavigation のフォーカス移動アクション（next/previous）
+  ✓ keyNavigation のフォーカス移動アクション（this.next() / this.previous()）
   ✗ event.stopPropagation()  ← processShortcut()で先に実行される
   ✗ event.preventDefault()   ← navigableDomElement のハンドラで実行される
 ```
@@ -469,10 +566,29 @@ no-key-navigation が防ぐもの:
 inputElement.classList.add('key-navigation-scrollable');
 ```
 
+`navigableDomElement.js` の矢印キーハンドラの該当部分：
+
+```javascript
+.add('up down left right', (e, key) => {
+    const $target = $(e.target);
+    if (!isInput($target)) {
+        if (
+            !$target.is('img') &&
+            !$target.hasClass('key-navigation-scrollable') &&     // ← ここでチェック
+            !($target.hasClass('key-navigation-scrollable-up') && (key === 'up' || key === 'left')) &&
+            !($target.hasClass('key-navigation-scrollable-down') && (key === 'down' || key === 'right'))
+        ) {
+            e.preventDefault();  // scrollable クラスがあればスキップされる
+        }
+        keyboard(key, e.target);  // ← scrollable に関係なく常に実行される
+    }
+}, { propagate: false })
+```
+
 **効果の範囲:**
 - `preventDefault()` → **回避される**（scrollable チェックで除外）
-- `stopPropagation()` → **依然として呼ばれる**（オプションレベル）
-- `keyboard(key, target)` → **依然として呼ばれる**（ナビゲーションが実行される）
+- `stopPropagation()` → **依然として呼ばれる**（`processShortcut` のオプション処理で実行済み）
+- `keyboard(key, target)` → **依然として呼ばれる**（条件分岐の外にあるため、ナビゲーションが実行される）
 
 **結論: `key-navigation-scrollable` だけでも不十分。** `preventDefault()` は回避できるが、`stopPropagation()` でイベント伝播が止まり、`keyboard()` でフォーカスが移動してしまう。
 
@@ -552,6 +668,7 @@ const isInput = $el =>
 **デメリット:**
 - PCI内でkeyNavigation のアクセシビリティ機能が無効になる
 - `.qti-customInteraction` クラス名への依存
+- `stopPropagation()` は `processShortcut` で `isInput()` チェック前に実行されるため、イベント伝播は依然として停止する（原因3参照）
 
 **顧客への説明:**
 > カスタムインタラクション（PCI）の領域内では、矢印キーをPCI本来の操作（カーソル移動、候補選択等）に使用できるようにします。PCI外のテストランナーUIではTAOのキーボードナビゲーション機能がそのまま使えます。
@@ -570,6 +687,7 @@ const isInput = $el =>
 **デメリット:**
 - 変更箇所が2ファイルに跨る
 - 両方のテストが必要
+- 妥協案2単体では `stopPropagation` 問題が残る（妥協案1と併用することで解消）
 
 ---
 
@@ -610,8 +728,15 @@ function processShortcut(event, descriptor) {
     const command = normalizeCommand(descriptor);
     const shortcut = shortcuts[command];
     if (shortcut && !states.disabled) {
-        // avoidInput チェック
-        if (shortcut.options.avoidInput === true) { /* ... */ }
+        // avoidInput チェック（変更なし）
+        if (shortcut.options.avoidInput === true) {
+            const $target = $(event.target);
+            if ($target.closest('[type="text"],textarea').length) {
+                if (!shortcut.options.allowIn || !$target.closest(shortcut.options.allowIn).length) {
+                    return;
+                }
+            }
+        }
 
         // ★ preventDefault/stopPropagation をハンドラの後に移動し、
         //    ハンドラの戻り値で制御可能にする
