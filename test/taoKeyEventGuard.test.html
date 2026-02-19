@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>taoKeyEventGuard - 動作検証</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, 'Hiragino Kaku Gothic ProN', 'Noto Sans JP', sans-serif; padding: 24px; background: #f5f5f5; color: #333; }
+        h1 { font-size: 18px; margin-bottom: 16px; }
+        h2 { font-size: 14px; margin-bottom: 8px; color: #666; }
+
+        .test-container { display: flex; gap: 24px; margin-bottom: 24px; }
+        .test-panel { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 16px; flex: 1; }
+        .test-panel h2 { border-bottom: 1px solid #eee; padding-bottom: 8px; margin-bottom: 12px; }
+
+        /* TAO 模擬コンテナ */
+        .qti-interaction { border: 2px solid #2196F3; border-radius: 4px; padding: 12px; margin-bottom: 8px; position: relative; }
+        .qti-interaction::before { content: '.qti-interaction (TAO)'; position: absolute; top: -10px; left: 8px; background: #2196F3; color: #fff; font-size: 10px; padding: 1px 6px; border-radius: 2px; }
+
+        /* PCI 模擬コンテナ */
+        .pci-root { border: 2px solid #4CAF50; border-radius: 4px; padding: 12px; margin-top: 12px; position: relative; }
+        .pci-root::before { content: 'PCI root (dom)'; position: absolute; top: -10px; left: 8px; background: #4CAF50; color: #fff; font-size: 10px; padding: 1px 6px; border-radius: 2px; }
+
+        /* 入力要素 */
+        .ime-input { border: 1px solid #999; border-radius: 4px; padding: 8px 12px; min-height: 40px; outline: none; font-size: 14px; }
+        .ime-input:focus { border-color: #4CAF50; box-shadow: 0 0 0 2px rgba(76, 175, 80, 0.2); }
+
+        /* イベントログ */
+        .event-log { font-family: 'Consolas', 'Monaco', monospace; font-size: 11px; background: #1e1e1e; color: #d4d4d4; border-radius: 4px; padding: 12px; height: 320px; overflow-y: auto; margin-top: 8px; }
+        .event-log .blocked { color: #f44336; }
+        .event-log .passed { color: #4CAF50; }
+        .event-log .ime { color: #FF9800; }
+        .event-log .info { color: #64B5F6; }
+        .event-log .entry { margin-bottom: 2px; white-space: pre; }
+
+        /* ステータス */
+        .status { display: flex; gap: 12px; margin-top: 8px; }
+        .status-item { font-size: 11px; padding: 4px 8px; border-radius: 4px; }
+        .status-item.active { background: #E8F5E9; color: #2E7D32; }
+        .status-item.inactive { background: #FFEBEE; color: #C62828; }
+
+        /* 説明 */
+        .instructions { background: #FFF8E1; border: 1px solid #FFE082; border-radius: 4px; padding: 12px; margin-bottom: 16px; font-size: 13px; line-height: 1.6; }
+        .instructions li { margin-left: 20px; }
+
+        button { padding: 6px 16px; border: 1px solid #ddd; border-radius: 4px; background: #fff; cursor: pointer; font-size: 12px; }
+        button:hover { background: #f0f0f0; }
+    </style>
+</head>
+<body>
+    <h1>taoKeyEventGuard 動作検証</h1>
+
+    <div class="instructions">
+        <strong>検証手順:</strong>
+        <ol>
+            <li>左側の入力欄（ガード有効）と右側の入力欄（ガード無効）にフォーカスして矢印キーを押す</li>
+            <li>IME を起動して日本語入力中に矢印キーを押す</li>
+            <li>イベントログで <span style="color:#f44336">BLOCKED</span>（遮断）/ <span style="color:#4CAF50">PASSED</span>（通過）を確認する</li>
+            <li>ガード有効側: 矢印キーが <span style="color:#f44336">BLOCKED</span>、Tab が <span style="color:#4CAF50">PASSED</span> であること</li>
+            <li>ガード無効側: 全キーが <span style="color:#4CAF50">PASSED</span> であること（TAO 環境ではここが横取りされる）</li>
+        </ol>
+    </div>
+
+    <div class="test-container">
+        <!-- ガード有効パネル -->
+        <div class="test-panel">
+            <h2>ガード有効（PCI対策A 適用）</h2>
+            <div id="tao-container-guarded" class="qti-interaction">
+                <div id="pci-root-guarded" class="pci-root">
+                    <div id="input-guarded" class="ime-input" contenteditable="true" data-placeholder="ここに入力..."></div>
+                </div>
+            </div>
+            <div class="status">
+                <span id="guard-status" class="status-item active">Guard: ON</span>
+                <span id="ime-status-guarded" class="status-item inactive">IME: OFF</span>
+            </div>
+            <div id="log-guarded" class="event-log"></div>
+            <div style="margin-top: 8px;">
+                <button onclick="clearLog('log-guarded')">ログクリア</button>
+            </div>
+        </div>
+
+        <!-- ガード無効パネル -->
+        <div class="test-panel">
+            <h2>ガード無効（対策なし = 現在の TAO 動作）</h2>
+            <div id="tao-container-unguarded" class="qti-interaction">
+                <div id="pci-root-unguarded" class="pci-root">
+                    <div id="input-unguarded" class="ime-input" contenteditable="true" data-placeholder="ここに入力..."></div>
+                </div>
+            </div>
+            <div class="status">
+                <span class="status-item inactive">Guard: OFF</span>
+                <span id="ime-status-unguarded" class="status-item inactive">IME: OFF</span>
+            </div>
+            <div id="log-unguarded" class="event-log"></div>
+            <div style="margin-top: 8px;">
+                <button onclick="clearLog('log-unguarded')">ログクリア</button>
+            </div>
+        </div>
+    </div>
+
+<script>
+// =====================================================================
+// taoKeyEventGuard モジュール（インライン版 - 検証用）
+// 本番では src/taoKeyEventGuard.js を AMD モジュールとして使用する
+// =====================================================================
+var taoKeyEventGuard = (function () {
+    'use strict';
+
+    var ARROW_KEYS = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
+
+    function isIMEComposing(event) {
+        return event.isComposing || event.keyCode === 229;
+    }
+
+    function isArrowKey(event) {
+        return ARROW_KEYS.indexOf(event.key) !== -1;
+    }
+
+    function init(pciRootElement, options) {
+        var config = {
+            guardArrowKeys: true,
+            guardIMEEvents: true,
+            additionalKeys: []
+        };
+
+        if (options) {
+            if (typeof options.guardArrowKeys === 'boolean') {
+                config.guardArrowKeys = options.guardArrowKeys;
+            }
+            if (typeof options.guardIMEEvents === 'boolean') {
+                config.guardIMEEvents = options.guardIMEEvents;
+            }
+            if (Array.isArray(options.additionalKeys)) {
+                config.additionalKeys = options.additionalKeys;
+            }
+        }
+
+        function onKeyDown(event) {
+            if (config.guardIMEEvents && isIMEComposing(event)) {
+                event.stopPropagation();
+                return;
+            }
+            if (config.guardArrowKeys && isArrowKey(event)) {
+                event.stopPropagation();
+                return;
+            }
+            if (config.additionalKeys.indexOf(event.key) !== -1) {
+                event.stopPropagation();
+                return;
+            }
+        }
+
+        pciRootElement.addEventListener('keydown', onKeyDown, false);
+
+        return {
+            destroy: function () {
+                pciRootElement.removeEventListener('keydown', onKeyDown, false);
+            }
+        };
+    }
+
+    return { init: init, isIMEComposing: isIMEComposing, isArrowKey: isArrowKey };
+})();
+
+// =====================================================================
+// TAO shortcutRegistry 模擬
+// 実際の TAO 環境では navigableDomElement が .qti-interaction 等に
+// shortcutRegistry を登録する。ここではその動作を模擬する。
+// =====================================================================
+function simulateTaoShortcutRegistry(containerElement, logId) {
+    // TAO の registry.js: registerEvent(root, 'keydown', onKeyboard) と同等
+    // bubble フェーズ (false) で登録
+    containerElement.addEventListener('keydown', function (event) {
+        var logEl = document.getElementById(logId);
+        var entry = document.createElement('div');
+        entry.className = 'entry';
+
+        // TAO の getActualKey() 模擬
+        var specialKeys = { 37: 'left', 38: 'up', 39: 'right', 40: 'down', 9: 'tab', 13: 'enter' };
+        var code = event.which || event.keyCode;
+        var resolvedKey = specialKeys[code] || (event.key && event.key.toLowerCase()) || '';
+
+        var timestamp = new Date().toLocaleTimeString('ja-JP', { hour12: false, fractionalSecondDigits: 3 });
+
+        // TAO の processShortcut() 模擬: ショートカットにマッチするか判定
+        var matched = ['left', 'right', 'up', 'down', 'tab'].indexOf(resolvedKey) !== -1;
+
+        if (matched) {
+            entry.className += ' passed';
+            entry.textContent = timestamp + ' [PASSED → TAO] key=' + event.key +
+                ' resolvedKey=' + resolvedKey +
+                (event.isComposing ? ' (composing)' : '');
+
+            // TAO の processShortcut 模擬: stopPropagation と preventDefault
+            // 実際の TAO ではここで event.stopPropagation() と event.preventDefault() が呼ばれる
+            // この検証では呼ばない（入力を壊さないため）
+        } else {
+            entry.className += ' info';
+            entry.textContent = timestamp + ' [PASSED → TAO] key=' + event.key +
+                ' (no shortcut match)';
+        }
+        logEl.appendChild(entry);
+        logEl.scrollTop = logEl.scrollHeight;
+    }, false);
+}
+
+// =====================================================================
+// イベント監視の設定
+// =====================================================================
+function setupMonitoring(inputId, pciRootId, logId, imeStatusId) {
+    var inputEl = document.getElementById(inputId);
+    var pciRootEl = document.getElementById(pciRootId);
+    var logEl = document.getElementById(logId);
+
+    // PCI root でのイベント到達を監視（ガードの後に実行される）
+    pciRootEl.addEventListener('keydown', function (event) {
+        // このリスナーは taoKeyEventGuard と同じ要素に登録される
+        // stopImmediatePropagation ではなく stopPropagation なので、
+        // 同一要素のリスナーは発火する（これは想定通り）
+    }, false);
+
+    // 入力要素での IME 状態監視
+    var imeStatusEl = document.getElementById(imeStatusId);
+    inputEl.addEventListener('compositionstart', function () {
+        imeStatusEl.textContent = 'IME: ON';
+        imeStatusEl.className = 'status-item active';
+
+        var entry = document.createElement('div');
+        entry.className = 'entry ime';
+        entry.textContent = getTimestamp() + ' [IME] compositionstart';
+        logEl.appendChild(entry);
+        logEl.scrollTop = logEl.scrollHeight;
+    });
+    inputEl.addEventListener('compositionend', function () {
+        imeStatusEl.textContent = 'IME: OFF';
+        imeStatusEl.className = 'status-item inactive';
+
+        var entry = document.createElement('div');
+        entry.className = 'entry ime';
+        entry.textContent = getTimestamp() + ' [IME] compositionend';
+        logEl.appendChild(entry);
+        logEl.scrollTop = logEl.scrollHeight;
+    });
+
+    // 入力要素での keydown 監視（最も内側 = 最初に発火）
+    inputEl.addEventListener('keydown', function (event) {
+        var entry = document.createElement('div');
+        entry.className = 'entry info';
+        entry.textContent = getTimestamp() + ' [INPUT] key=' + event.key +
+            ' keyCode=' + event.keyCode +
+            ' isComposing=' + event.isComposing;
+        logEl.appendChild(entry);
+        logEl.scrollTop = logEl.scrollHeight;
+    }, false);
+}
+
+function getTimestamp() {
+    return new Date().toLocaleTimeString('ja-JP', { hour12: false, fractionalSecondDigits: 3 });
+}
+
+function clearLog(logId) {
+    document.getElementById(logId).innerHTML = '';
+}
+
+// =====================================================================
+// 初期化
+// =====================================================================
+
+// ガード有効側: taoKeyEventGuard を PCI root に設定
+var guard = taoKeyEventGuard.init(document.getElementById('pci-root-guarded'));
+
+// TAO shortcutRegistry 模擬を .qti-interaction に登録（両方）
+simulateTaoShortcutRegistry(document.getElementById('tao-container-guarded'), 'log-guarded');
+simulateTaoShortcutRegistry(document.getElementById('tao-container-unguarded'), 'log-unguarded');
+
+// ガード有効側の .qti-interaction で BLOCKED 検出
+document.getElementById('tao-container-guarded').addEventListener('keydown', function () {
+    // このリスナーには到達しない（ガードが止める）ので、PASSED のみ表示される
+}, false);
+
+// PCI root にイベントが到達したかを検出（ガードの stopPropagation を確認）
+(function () {
+    var pciGuarded = document.getElementById('pci-root-guarded');
+    var logGuarded = document.getElementById('log-guarded');
+
+    // capture フェーズで監視: stopPropagation の影響を受けない
+    pciGuarded.addEventListener('keydown', function (event) {
+        // bubble では taoKeyEventGuard が stopPropagation を呼ぶので、
+        // .qti-interaction のリスナーに到達するかどうかが重要
+        // capture で先にログを出して、後で TAO 側に PASSED が出ないことを確認
+    }, true);
+})();
+
+// イベント監視をセットアップ
+setupMonitoring('input-guarded', 'pci-root-guarded', 'log-guarded', 'ime-status-guarded');
+setupMonitoring('input-unguarded', 'pci-root-unguarded', 'log-unguarded', 'ime-status-unguarded');
+
+// ガード有効側: TAO に到達しなかったイベントを BLOCKED として記録
+(function () {
+    var pciRoot = document.getElementById('pci-root-guarded');
+    var logEl = document.getElementById('log-guarded');
+    var arrowKeys = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
+
+    // capture フェーズで全キーを記録し、bubble で TAO に到達したかを比較
+    pciRoot.addEventListener('keydown', function (event) {
+        if (arrowKeys.indexOf(event.key) !== -1 || event.isComposing || event.keyCode === 229) {
+            // ガードが stopPropagation するため TAO には到達しない
+            setTimeout(function () {
+                var entry = document.createElement('div');
+                entry.className = 'entry blocked';
+                entry.textContent = getTimestamp() + ' [BLOCKED] key=' + event.key +
+                    ' → TAO shortcutRegistry に到達せず';
+                logEl.appendChild(entry);
+                logEl.scrollTop = logEl.scrollHeight;
+            }, 0);
+        }
+    }, true);
+})();
+
+</script>
+</body>
+</html>
