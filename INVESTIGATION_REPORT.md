@@ -248,7 +248,183 @@ keydown バブリング:
 
 ---
 
-## 8. 調査対象ソースコード一覧
+## 8. 拡張テキストインタラクションで矢印キーが正常動作する理由
+
+### 事象
+
+TAO の標準インタラクションである **拡張テキストインタラクション**（`extendedTextInteraction`）では、矢印キーによるカーソル移動が正常に動作する。一方、PCI（カスタムインタラクション）では同じ矢印キー操作が妨害される。
+
+### 原因: `isInput()` の判定結果の違い
+
+この差異は、欠陥3 で示した `isInput()` の判定結果に直結する。
+
+```javascript
+// navigableDomElement.js
+const isInput = $el => $el.is(':text,textarea');
+```
+
+矢印キーハンドラは `isInput()` が `true` を返すと**処理全体をスキップ**する:
+
+```javascript
+.add('up down left right', (e, key) => {
+    const $target = $(e.target);
+    if (!isInput($target)) {       // true → スキップ、false → 横取り
+        e.preventDefault();        // ネイティブ動作ブロック
+        keyboard(key, e.target);   // TAO フォーカス移動
+    }
+}, { propagate: false })
+```
+
+### 拡張テキストインタラクションの場合（正常動作）
+
+拡張テキストインタラクションは **プレーンテキストモード** では `<textarea>` を描画する:
+
+```html
+<!-- ExtendedTextInteraction のレンダリング結果 -->
+<textarea class="text-container text-plain solid" ...></textarea>
+```
+
+| 判定 | 結果 | 理由 |
+|---|---|---|
+| `$el.is(':text,textarea')` | **true** | `<textarea>` は `:textarea` にマッチ |
+| `isInput()` | **true** | → ハンドラ本体がスキップされる |
+| `preventDefault()` | **呼ばれない** | → ネイティブカーソル移動が維持 |
+| `keyboard()` | **呼ばれない** | → TAO フォーカス移動も発生しない |
+
+さらに **XHTML モード**（リッチテキスト）では CKEditor を使用し、`<div contenteditable="true">` を描画するが、TAO は CKEditor コンテナに `no-key-navigation` クラスを明示的に付与している:
+
+```javascript
+// ExtendedTextInteraction.js（XHTML モード）
+if (editor.container && editor.container.$) {
+    $(editor.container.$).addClass('no-key-navigation');
+}
+```
+
+この `no-key-navigation` クラスにより、`allowedToNavigateFrom()` が `false` を返し、キーナビゲーションのアクション（フォーカス移動）がブロックされる。
+
+### PCI の場合（問題発生）
+
+PCI は開発者が自由に DOM を構築する。自社 IME が使う `<div contenteditable="true">` の場合:
+
+```html
+<!-- PCI のカスタム DOM -->
+<div contenteditable="true" class="my-ime-input"></div>
+```
+
+| 判定 | 結果 | 理由 |
+|---|---|---|
+| `$el.is(':text,textarea')` | **false** | `<div>` は `:text` にも `:textarea` にもマッチしない |
+| `isInput()` | **false** | → ハンドラ本体が実行される |
+| `preventDefault()` | **呼ばれる** | → ネイティブカーソル移動がブロック |
+| `keyboard()` | **呼ばれる** | → TAO フォーカス移動が発生 |
+
+### まとめ: なぜ差が生じるか
+
+```
+拡張テキスト (textarea):
+  矢印キー → isInput()=true → スキップ → ネイティブ動作維持 ✓
+
+拡張テキスト (CKEditor/XHTML):
+  矢印キー → isInput()=false → ハンドラ実行
+    → allowedToNavigateFrom()=false (no-key-navigation) → 移動ブロック ✓
+
+PCI (contenteditable):
+  矢印キー → isInput()=false → ハンドラ実行
+    → preventDefault() + keyboard() → ネイティブ動作ブロック ✗
+```
+
+つまり、TAO は自身の標準インタラクションには個別の保護措置（`<textarea>` の型判定、CKEditor の `no-key-navigation` クラス）を講じているが、PCI にはそのような保護が存在しない。PCI 開発者が TAO の内部実装を知らない限り、この問題を回避することは困難である。
+
+---
+
+## 9. GitHub 上の開発者のやりとり・推奨設定の調査
+
+### 調査範囲
+
+以下のリポジトリの Issue・Pull Request・Wiki・ディスカッションを調査した:
+
+- `oat-sa/tao-test-runner-qti-fe`
+- `oat-sa/tao-core-ui-fe`
+- `oat-sa/tao-core-sdk-fe`
+- `oat-sa/extension-tao-testqti`
+- `oat-sa/tao-core`
+- `openPCI/openPCIs`、`EJTH/open-tao-pcis`（外部 PCI プロジェクト）
+- TAO Community Forum（`forum.taotesting.com`）
+
+### 調査結果: 公開 Issue・PR は存在しない
+
+**PCI 内で矢印キーが効かない問題を報告した公開 Issue・PR・ディスカッションは、いずれのリポジトリにも存在しなかった。**
+
+これは以下のいずれかを意味する:
+
+- OAT 社の内部（非公開）Issue トラッカーで管理されている
+- PCI で IME を使うケースが一般的でなく、問題が報告されていない
+- 外部 PCI 開発者が TAO の keyNavigation 内部実装まで追跡する機会が少ない
+
+### 関連する唯一の公開情報: 2024-11 LTS リリースノート
+
+[TAO 2024-11 LTS リリースノート](https://userguide.taotesting.com/release-notes/latest/public/2024-11-lts) に以下の修正が含まれている:
+
+> "Keyboard shortcuts were not usable for order interactions when using the new order single list mode."
+
+これは Order インタラクションとキーボードショートカットの衝突修正であり、**キーボード操作とインタラクションの衝突が OAT 社内で認識されている問題カテゴリ** であることの根拠となる。ただし、PCI や矢印キーに直接言及したものではない。
+
+### PCI 開発ドキュメントにキーボード対策の記述なし
+
+| ドキュメント | URL | キーボード対策の記述 |
+|---|---|---|
+| PCI Development Guide | [taohub-articles/forge/pci-development.md](https://github.com/oat-sa/taohub-articles/blob/master/forge/pci-development.md) | **なし** |
+| TAO PCI Specification | [taohub-articles/forge/QTI/tao-pci.md](https://github.com/oat-sa/taohub-articles/blob/master/forge/QTI/tao-pci.md) | **なし** |
+| Test Runner Config Wiki | [extension-tao-testqti/wiki/Test-Runner-Config](https://github.com/oat-sa/extension-tao-testqti/wiki/Test-Runner-Config) | **なし** |
+| Test Runner Plugins Wiki | [extension-tao-testqti/wiki/Test-Runner-Plugins](https://github.com/oat-sa/extension-tao-testqti/wiki/Test-Runner-Plugins) | **なし** |
+
+PCI 開発者向けドキュメントには、キーボードイベントの処理方法、TAO の keyNavigation との共存方法、推奨する CSS クラス（`no-key-navigation` 等）の使用方法について**一切記載がない**。
+
+### テストランナー設定の推奨値
+
+TAO の `testRunner.conf.php` における関連設定と、本問題への影響:
+
+| 設定項目 | デフォルト値 | 矢印キー問題への影響 |
+|---|---|---|
+| `allow-shortcuts` | `true` | **効果なし**（矢印キーは別 registry で管理） |
+| `keyNavigation.contentNavigatorType` | `'default'` | `'linear'` に変えても矢印キーの問題は変わらない |
+| `keyNavigation` plugin `active` | `true` | **`false` にすると矢印キー問題は解消するが、テスト全体のキーボードナビゲーションが失われる** |
+
+### CSS クラスによる回避策
+
+TAO の keyNavigation が内部的に提供する CSS クラス:
+
+| クラス名 | 効果 | PCI からの利用 |
+|---|---|---|
+| `no-key-navigation` | `allowedToNavigateFrom()` が `false` を返す → ナビゲーションアクション停止 | **部分的に有効**（ただし `stopPropagation` と `preventDefault` は先に実行済み） |
+| `key-navigation-scrollable` | 矢印キーの `preventDefault()` をスキップ | **部分的に有効**（ただし `keyboard()` は実行される） |
+| `key-navigation-scrollable-up` | 上・左矢印の `preventDefault()` をスキップ | 同上 |
+| `key-navigation-scrollable-down` | 下・右矢印の `preventDefault()` をスキップ | 同上 |
+| `key-navigation-actionable` | Enter キーの `preventDefault()` をスキップ | Enter キーのみ |
+
+**いずれの CSS クラスも PCI に自動付与されない。** PCI 開発者が明示的に付与する必要があるが、これらのクラスの存在自体がドキュメント化されていない。
+
+### keyNavigation プラグインの開発者情報
+
+| 項目 | 内容 |
+|---|---|
+| プラグイン ID | `keyNavigation` |
+| 正式名 | Keyboard Navigation |
+| カテゴリ | content（accessibility） |
+| 作者 | Jean-Sebastien Conan (jean-sebastien@taotesting.com) |
+| タグ | `core`, `qti` |
+| 登録スクリプト | [RegisterTestRunnerPlugins.php](https://github.com/oat-sa/extension-tao-testqti/blob/master/scripts/install/RegisterTestRunnerPlugins.php) |
+
+### この調査からの示唆
+
+1. **本問題は公的に未報告** — TAO エコシステム全体に影響する問題だが、日本語 IME を PCI 内で使うケースが世界的に稀であるため表面化していない可能性が高い
+2. **PCI 開発者への情報提供が不足** — TAO の keyNavigation との共存に関するガイダンスが公式ドキュメントに存在しない
+3. **TAO 側の保護は標準インタラクション限定** — `<textarea>` や CKEditor には保護があるが、PCI には適用されていない
+4. **OAT 社はキーボード衝突を認識** — 2024-11 LTS で Order インタラクションの衝突を修正しており、類似問題の報告は受け入れられる可能性がある
+
+---
+
+## 10. 調査対象ソースコード一覧
 
 | リポジトリ | ファイル | 役割 |
 |---|---|---|
@@ -260,15 +436,33 @@ keydown バブリング:
 | `tao-test-runner-qti-fe` | `src/plugins/content/accessibility/keyNavigation/modes/defaultMode.js` | デフォルトモードキー設定 |
 | `tao-test-runner-qti-fe` | `src/plugins/content/accessibility/keyNavigation/strategies/itemNavigation.js` | アイテム内ナビゲーション戦略 |
 | `tao-test-runner-qti-fe` | `src/plugins/navigation/next.js` | 次問題ナビゲーション |
+| `tao-item-runner-qti-fe` | `src/qtiCommonRenderer/renderers/interactions/ExtendedTextInteraction.js` | 拡張テキストインタラクション描画 |
+| `tao-item-runner-qti-fe` | `src/qtiCommonRenderer/tpl/interactions/customInteraction.tpl` | PCI テンプレート |
 | `extension-tao-testqti` | `config/default/testRunner.conf.php` | テストランナー設定 |
+| `extension-tao-testqti` | `scripts/install/RegisterTestRunnerPlugins.php` | プラグイン登録 |
 
-## 9. 参考リンク
+## 11. 参考リンク
 
+### TAO ソースコード・ドキュメント
+- [tao-test-runner-qti-fe](https://github.com/oat-sa/tao-test-runner-qti-fe) - テストランナー（keyNavigation プラグイン含む）
+- [tao-core-ui-fe](https://github.com/oat-sa/tao-core-ui-fe) - コア UI（navigableDomElement 含む）
+- [tao-core-sdk-fe](https://github.com/oat-sa/tao-core-sdk-fe) - コア SDK（shortcut registry 含む）
+- [tao-item-runner-qti-fe](https://github.com/oat-sa/tao-item-runner-qti-fe) - QTI アイテムランナー（ExtendedTextInteraction 含む）
+- [Test Runner Config Wiki](https://github.com/oat-sa/extension-tao-testqti/wiki/Test-Runner-Config) - テストランナー設定
+- [Test Runner Plugins Wiki](https://github.com/oat-sa/extension-tao-testqti/wiki/Test-Runner-Plugins) - プラグイン一覧
+- [PCI Development Guide](https://github.com/oat-sa/taohub-articles/blob/master/forge/pci-development.md) - PCI 開発ガイド
+- [TAO PCI Specification](https://github.com/oat-sa/taohub-articles/blob/master/forge/QTI/tao-pci.md) - TAO PCI 仕様
+- [RegisterTestRunnerPlugins.php](https://github.com/oat-sa/extension-tao-testqti/blob/master/scripts/install/RegisterTestRunnerPlugins.php) - プラグイン登録スクリプト
+
+### TAO リリースノート・ユーザーガイド
+- [TAO 2024-11 LTS Release Notes](https://userguide.taotesting.com/release-notes/latest/public/2024-11-lts) - Order インタラクションのキーボード修正
+- [TAO Keyboard Navigation Guide](https://www.taotesting.com/user-guide/users/taking-a-test/keyboard-navigation/) - 公式ショートカット一覧
+
+### Web 標準・ブラウザ仕様
 - [MDN: Element keydown event](https://developer.mozilla.org/en-US/docs/Web/API/Element/keydown_event) - isComposing の推奨パターン
+- [MDN: KeyboardEvent.keyCode](https://developer.mozilla.org/en-US/docs/Web/API/KeyboardEvent/keyCode) - keyCode（非推奨）
 - [Mozilla Bug #1529467](https://bugzilla.mozilla.org/show_bug.cgi?id=1529467) - IME コンポジション中の矢印キー挙動
 - [Mozilla Bug #1343451](https://bugzilla.mozilla.org/show_bug.cgi?id=1343451) - keyCode 229 の扱い
+
+### IMS 仕様
 - [IMS PCI Specification](https://www.imsglobal.org/sites/default/files/assessment/pciv1p0/pciv1p0.html)
-- [TAO PCI Developer Guide](https://github.com/oat-sa/taohub-articles/blob/master/forge/QTI/tao-pci.md)
-- [tao-test-runner-qti-fe](https://github.com/oat-sa/tao-test-runner-qti-fe)
-- [tao-core-ui-fe](https://github.com/oat-sa/tao-core-ui-fe)
-- [tao-core-sdk-fe](https://github.com/oat-sa/tao-core-sdk-fe)
