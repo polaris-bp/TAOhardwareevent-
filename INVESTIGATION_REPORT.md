@@ -1,154 +1,99 @@
-# TAO CBT システム - 矢印キー ハードウェアキーイベント問題 調査報告書
+# TAO CBT システム 矢印キー問題 調査報告書
 
-## 概要
+## 1. エグゼクティブサマリー
 
-TAO (Testing Assisté par Ordinateur) CBTシステムの受験画面（テストランナー）において、ハードウェアキーボードの上下左右矢印キーが期待通りに動作しない問題について調査を実施した。特に**自社IMEのPCI（Portable Custom Interaction）内でのカーソル操作**が妨害される問題の真の原因を特定し、対策を決定した。
-
-### 決定事項
-
-**PCI ルート要素での矢印キー `stopPropagation` を採用する。**
-
-PCI の `initialize()` メソッド冒頭で、矢印キーの keydown イベントが TAO 側へ伝播しないよう遮断する。
-
-```javascript
-dom.addEventListener('keydown', function(event) {
-    var arrowKeys = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
-    if (arrowKeys.indexOf(event.key) !== -1) {
-        event.stopPropagation();
-    }
-}, false);
-```
-
-- TAO のコード変更が不要
-- PCI の `initialize()` に5行追加するだけで完結
-- TAO 側の全ての欠陥（`preventDefault`、`stopPropagation`、ナビゲーション実行）を一括で回避
-- `preventDefault()` を呼ばないため、PCI 内のネイティブ動作（カーソル移動等）は維持
+| 項目 | 内容 |
+|---|---|
+| **対象システム** | TAO CBT テストランナー（受験画面） |
+| **問題** | PCI（カスタムインタラクション）内でハードウェアキーボードの矢印キーが効かない |
+| **影響** | 自社 IME のカーソル移動・候補選択が不能になり、受験者の入力操作が妨害される |
+| **根本原因** | TAO の keydown イベント処理における 3 つの欠陥の連鎖（後述） |
+| **採用した対策** | PCI の `initialize()` で矢印キーの `stopPropagation()` を実行（5 行追加） |
+| **TAO 側の変更** | 不要 |
 
 ---
 
-## 調査対象ソースコード
+## 2. 問題の概要
 
-| リポジトリ | ファイル | 役割 |
-|---|---|---|
-| `tao-core-sdk-fe` | `src/util/shortcut/registry.js` | ショートカットキー登録・検出基盤 |
-| `tao-core-ui-fe` | `src/keyNavigation/navigableDomElement.js` | DOM要素レベルのキーイベント処理 |
-| `tao-test-runner-qti-fe` | `src/plugins/content/accessibility/keyNavigation/plugin.js` | キーナビゲーションプラグイン本体 |
-| `tao-test-runner-qti-fe` | `src/plugins/content/accessibility/keyNavigation/keyNavigation.js` | キーナビゲーション制御ロジック |
-| `tao-test-runner-qti-fe` | `src/plugins/content/accessibility/keyNavigation/helpers.js` | ナビゲーション判定ヘルパー |
-| `tao-test-runner-qti-fe` | `src/plugins/content/accessibility/keyNavigation/modes/defaultMode.js` | デフォルトモードキー設定 |
-| `tao-test-runner-qti-fe` | `src/plugins/content/accessibility/keyNavigation/strategies/itemNavigation.js` | アイテム内ナビゲーション戦略 |
-| `tao-test-runner-qti-fe` | `src/plugins/navigation/next.js` | 次問題ナビゲーション（allowShortcutsチェック参照用） |
-| `extension-tao-testqti` | `config/default/testRunner.conf.php` | テストランナー設定 |
+TAO テストランナーの受験画面には「キーナビゲーション」という機能があり、矢印キーで画面上のフォーカスを移動できる。この機能が PCI（Portable Custom Interaction＝カスタム問題タイプ）内の矢印キー操作と衝突し、以下の症状が発生する。
+
+**発生する症状:**
+- PCI 内の `contenteditable` 要素でカーソルが動かない
+- IME コンポジション中に矢印キーで候補選択ができない
+- 矢印キーを押すとフォーカスが PCI 外に飛んでしまう
+
+**再現条件が不安定な理由:**
+IME コンポジション中の矢印キーの `keyCode` はブラウザ・OS・IME の組み合わせにより異なる。`keyCode=229` の場合は TAO がスルーして正常動作するが、実際のキーコード（37〜40）が返る環境では TAO がインターセプトして問題が発生する。
 
 ---
 
-## 真の原因
+## 3. 原因の詳細
 
-### 問題の全体像
+TAO の keydown イベント処理パイプラインに **3 つの欠陥** がある。これらが連鎖して PCI 内の矢印キー操作を妨害する。
 
-PCI 内で矢印キーが効かない原因は、TAO の keydown イベント処理パイプラインにおける **3つの欠陥の連鎖** にある。
+### 処理の流れと欠陥の関係
 
 ```
 受験者が PCI 内で矢印キーを押す
     │
     ▼
-registry.js: onKeyboard(event)
+[registry.js] onKeyboard(event)
     │
-    │  ★ 欠陥1: IME コンポジション中かどうかを判定しない
-    │           → IME 操作中の矢印キーもショートカットとして処理してしまう
-    │
-    ▼
-registry.js: processShortcut()
-    │
-    ├─ ★ 欠陥2: stopPropagation() をハンドラ実行前に呼ぶ
-    │            → ハンドラ側で「処理不要」と判断しても、伝播は既に止まっている
+    │  ★ 欠陥1: IME コンポジション判定なし
+    │     → IME 操作中の矢印キーもショートカットとして処理される
     │
     ▼
-navigableDomElement.js: 矢印キーハンドラ
+[registry.js] processShortcut()
     │
-    ├─ ★ 欠陥3: isInput() が PCI のカスタム要素を認識しない
-    │            → contenteditable 等が入力欄と判定されず、矢印キーを横取りする
+    │  ★ 欠陥2: stopPropagation() をハンドラ実行前に呼ぶ
+    │     → ハンドラが「処理不要」と判断しても、伝播は既に止まっている
     │
     ▼
-結果: preventDefault() でネイティブ動作ブロック
+[navigableDomElement.js] 矢印キーハンドラ
+    │
+    │  ★ 欠陥3: isInput() が PCI のカスタム要素を認識しない
+    │     → contenteditable 等が入力欄と判定されず、矢印キーを横取り
+    │
+    ▼
+結果: preventDefault() でネイティブ動作がブロック
       keyboard() で TAO のフォーカス移動が発生
-      → IME カーソル移動が完全に妨害される
+      → PCI 内の矢印キー操作が完全に妨害される
 ```
 
-以下、各欠陥の詳細を説明する。
+### 欠陥1: IME コンポジション状態の無視
 
----
-
-### 欠陥1: `registry.js` が IME コンポジション状態を無視する
-
-**場所:** `tao-core-sdk-fe/src/util/shortcut/registry.js`
+**場所:** `tao-core-sdk-fe/src/util/shortcut/registry.js` の `onKeyboard()`
 
 ```javascript
 function onKeyboard(event) {
     // ★ event.isComposing のチェックが存在しない
-    processShortcut(event, {
-        keyboardInvolved: true,
-        ctrlKey: event.ctrlKey,
-        altKey: event.altKey,
-        shiftKey: event.shiftKey,
-        metaKey: event.metaKey,
-        key: getActualKey(event)
-    });
+    processShortcut(event, { /* ... */ });
 }
 ```
 
-[MDN の公式推奨パターン](https://developer.mozilla.org/en-US/docs/Web/API/Element/keydown_event)では、IME コンポジション中のイベントを無視するために `event.isComposing || event.keyCode === 229` のチェックが必須とされている。TAO にはこのチェックが完全に欠落している。
+MDN が推奨する `event.isComposing || event.keyCode === 229` のチェックが欠落している。IME 変換中の矢印キーもショートカットとしてマッチし、処理されてしまう。
 
-**ブラウザによる挙動の違い:**
+### 欠陥2: stopPropagation() の早すぎる実行
 
-IME コンポジション中に矢印キーを押した場合、ブラウザ・OS・IME の組み合わせにより `keyCode` の値が異なる。
-
-| ケース | keyCode | getActualKey() の結果 | TAO の反応 |
-|---|---|---|---|
-| A: keyCode=229 | 229 | `'process'`（マッチなし） | スルー → IME 動作する |
-| B: 実際のキーコード | 37〜40 | `'left'`/`'right'`/`'up'`/`'down'` | **マッチ → IME がブロックされる** |
-
-ケース B の発生はブラウザ・OS・IME の組み合わせに依存するため、**再現条件が不安定になる根本原因**でもある（[Mozilla Bug #1529467](https://bugzilla.mozilla.org/show_bug.cgi?id=1529467) 参照）。
-
----
-
-### 欠陥2: `stopPropagation()` がハンドラ実行前に呼ばれる
-
-**場所:** `tao-core-sdk-fe/src/util/shortcut/registry.js` の `processShortcut`
+**場所:** `tao-core-sdk-fe/src/util/shortcut/registry.js` の `processShortcut()`
 
 ```javascript
 function processShortcut(event, descriptor) {
-    const command = normalizeCommand(descriptor);
     const shortcut = shortcuts[command];
-
     if (shortcut && !states.disabled) {
-        // [1] avoidInput チェック（矢印キーには未設定 → スキップ）
-        if (shortcut.options.avoidInput === true) { /* ... */ }
-
-        // [2] ★ ハンドラ実行前に stopPropagation
+        // ★ ハンドラ実行「前」に stopPropagation
         if (shortcut.options.propagate === false) {
-            event.stopPropagation();   // ← ここで伝播が止まる
+            event.stopPropagation();  // ← ここで伝播が止まる
         }
-        // [3] preventDefault（矢印キーには未設定 → スキップ）
-        if (shortcut.options.prevent === true) {
-            event.preventDefault();
-        }
-        // [4] ハンドラの実行（この中で isInput() 判定が行われる）
-        const shortcutHandlers = getCommandHandlers(command);
-        if (shortcutHandlers) {
-            _.forEach(shortcutHandlers, function (handler) {
-                handler(event, command);
-            });
-        }
+        // ハンドラの実行（isInput() 判定はここの中）
+        _.forEach(handlers, function(handler) { handler(event, command); });
     }
 }
 ```
 
-矢印キーは `{ propagate: false }` で登録されている。`stopPropagation()` は [2] で実行されるが、ハンドラ内の `isInput()` チェックは [4] で行われる。**仮に `isInput()` が true を返してハンドラ内の処理がスキップされても、`stopPropagation()` は既に実行済み**であり、イベントは親要素に伝播しない。
+矢印キーは `{ propagate: false }` で登録されている。ハンドラ内で「この要素は入力欄なので処理をスキップする」と判断しても、その前に `stopPropagation()` が実行済みのため、イベントは失われる。
 
----
-
-### 欠陥3: `isInput()` が PCI のカスタム要素を認識しない
+### 欠陥3: isInput() の判定範囲が狭い
 
 **場所:** `tao-core-ui-fe/src/keyNavigation/navigableDomElement.js`
 
@@ -156,125 +101,40 @@ function processShortcut(event, descriptor) {
 const isInput = $el => $el.is(':text,textarea');
 ```
 
-この判定がカバーする要素は `<input type="text">` と `<textarea>` のみ。PCI で多用される以下の要素は**入力欄と認識されない:**
+`<input type="text">` と `<textarea>` しか入力欄と認識しない。PCI で使われる以下の要素は判定から漏れる:
 
-- `<div contenteditable="true">`（MathQuill 等）
-- `<input type="number">`, `<input type="search">`, `<input type="email">`
+- `<div contenteditable="true">`（MathQuill 等の数式入力）
+- `<input type="number">`, `<input type="search">` 等
 - カスタム Web Components、`<canvas>` ベースの入力
 
-結果として、矢印キーハンドラは PCI 内のカスタム入力要素に対して以下を実行する:
-
-```javascript
-.add('up down left right', (e, key) => {
-    const $target = $(e.target);
-    if (!isInput($target)) {           // ← PCI のカスタム要素は false
-        if (/* scrollable チェック */) {
-            e.preventDefault();        // ★ ネイティブ動作ブロック
-        }
-        keyboard(key, e.target);       // ★ TAO のフォーカス移動が実行される
-    }
-}, { propagate: false })
-```
-
 ---
 
-### 補足: TAO 側の設定による挙動
+## 4. 「ショートカット設定オフ」との関係
 
-#### `allow-shortcuts: false` は矢印キーに効かない
+CBT システム側で「ショートカット設定をオフ」にすると矢印キーが正常動作した事象が確認されているが、ソースコード追跡の結果、以下のことが判明した。
 
-ソースコードの追跡により、**`allow-shortcuts: false` は矢印キーのインターセプトを止めない**ことが確定した。
+### `allow-shortcuts: false` は矢印キーに効かない
 
-理由は2つある。
+TAO には 2 種類の shortcutRegistry が存在する:
 
-**理由1: `allow-shortcuts` は「登録しない」だけであり、registry の無効化ではない**
-
-`allow-shortcuts: false`（JS 側では `allowShortcuts`）は、各プラグインの `init()` 内で `shortcut.add()` を呼ぶかどうかのガード条件として使われている:
-
-```javascript
-// next.js, previous.js, highlighter 等（グローバル registry を使うプラグイン）
-if (testRunnerOptions.allowShortcuts && kbdShortcut) {
-    shortcut.add(...);  // allowShortcuts=false なら add 自体をスキップ
-}
-```
-
-`shortcut.disable()` を呼ぶコードは TAO の本番コードに**存在しない**（ユニットテストのみ）。
-
-**理由2: 矢印キーはグローバル registry とは別の独立インスタンスに登録される**
-
-TAO には2種類の shortcutRegistry が存在する:
-
-```javascript
-// ① グローバル singleton（window にバインド）
-// util/shortcut.js
-export default shortcutRegistry(window, defaultOptions);
-
-// ② 要素ごとの独立インスタンス（各 DOM 要素にバインド）
-// navigableDomElement.js
-const shortcuts = shortcutRegistry($element);
-```
-
-| registry | バインド先 | 用途 | `allowShortcuts` の影響 |
+| registry | バインド先 | 登録キー | `allow-shortcuts` の影響 |
 |---|---|---|---|
-| ① グローバル `util/shortcut` | `window` | J/K/C 等 | **あり**（add をスキップ） |
-| ② 要素別 `shortcutRegistry($element)` | 各 DOM 要素 | **矢印キー・Tab・Enter** | **なし** |
+| グローバル singleton | `window` | J / K / C 等の汎用キー | **あり**（登録をスキップ） |
+| 要素別インスタンス | 各 DOM 要素 | **矢印キー・Tab・Enter** | **なし** |
 
-矢印キーは ② の要素別インスタンスに登録されるため、`allowShortcuts` の設定に関わらず常にアクティブとなる。仮にグローバル registry が `disable()` されたとしても、② は完全に別のオブジェクトであり影響を受けない。
+矢印キーは要素別インスタンスに登録されるため、`allow-shortcuts` の設定に関係なく常にアクティブになる。
 
-#### 「ショートカット設定オフで矢印キーが効いた」事象の解釈
+### 実際に効いていたのは keyNavigation プラグインの無効化
 
-CBT システム側で「ショートカット設定をオフ」にした際に矢印キーが正常動作した事象が確認されている。上記の分析により `allow-shortcuts: false` では説明できないため、**keyNavigation プラグイン自体の非活性化**が行われたと推定する:
-
-```php
-'keyNavigation' => ['active' => false]
-```
-
-プラグインがロードされなければ `navigableDomElement` も生成されず、矢印キーの shortcutRegistry 登録自体が行われない。
-
-#### keyNavigation プラグイン無効化では不十分な理由
-
-| 観点 | keyNavigation プラグイン無効化 | PCI 内 `stopPropagation` |
-|---|---|---|
-| TAO 側の設定変更 | **必要**（TAO 管理者依存） | 不要 |
-| PCI 開発者が制御可能か | いいえ | **はい** |
-| 影響範囲 | テスト全体のキーボードナビ喪失 | **矢印キーのみ、PCI 内のみ** |
-| アクセシビリティ（WCAG） | 準拠不可 | PCI 外は維持 |
-| 設定変更後の再設定リスク | TAO アップデート時に戻る可能性 | PCI コードに内包 |
-
-#### `avoidInput` オプションが効かない理由
-
-`avoidInput` は `processShortcut` 内で `[type="text"],textarea` のみを判定する。PCI のカスタム要素はカバーされない。加えて、**矢印キーのショートカットには `avoidInput` オプション自体が設定されていない**ため、この判定自体が実行されない。
+「ショートカット設定オフ」で矢印キーが効いた事象は、`allow-shortcuts: false` ではなく **keyNavigation プラグイン自体の非活性化** (`'keyNavigation' => ['active' => false]`) が行われていたと推定する。プラグインがロードされなければ、矢印キーの shortcutRegistry 登録自体が行われない。
 
 ---
 
-## 採用対策の詳細
+## 5. 採用した対策
 
 ### 方針
 
-PCI の `initialize()` メソッド冒頭で、PCI ルート要素（`dom`）に keydown リスナーを登録し、矢印キーイベントの上位への伝播を遮断する。TAO のハンドラはバブルフェーズ（`addEventListener(..., false)`）で PCI より外側の要素に登録されているため、PCI ルートで `stopPropagation()` を呼べば TAO のハンドラには到達しない。
-
-### イベント伝播の構造
-
-```
-DOM ツリー（上が外側）:
-┌──────────────────────────────────────────────────────┐
-│ .qti-item  (テストランナー管理)                        │
-│  ┌──────────────────────────────────────────────────┐ │
-│  │ .qti-interaction.qti-customInteraction           │ │
-│  │  ← TAO の shortcutRegistry がここに登録           │ │
-│  │  ┌──────────────────────────────────────────────┐│ │
-│  │  │ PCI ルート要素 (dom)                          ││ │
-│  │  │  ← ★ ここで stopPropagation して遮断          ││ │
-│  │  │  ┌──────────────────────────────────────────┐││ │
-│  │  │  │ カスタム入力要素                          │││ │
-│  │  │  │ (contenteditable, canvas, etc.)          │││ │
-│  │  │  └──────────────────────────────────────────┘││ │
-│  │  └──────────────────────────────────────────────┘│ │
-│  └──────────────────────────────────────────────────┘ │
-└──────────────────────────────────────────────────────┘
-
-keydown バブリング:
-  入力要素 → PCI root (★ここで遮断) ╳ → TAO shortcutRegistry → ...
-```
+PCI の `initialize()` でルート要素に keydown リスナーを登録し、矢印キーイベントが TAO 側に伝播しないよう遮断する。
 
 ### 実装コード
 
@@ -293,158 +153,122 @@ initialize: function initialize(id, dom, config, state) {
 }
 ```
 
-**この5行だけで、TAO 側の3つの欠陥を全て回避できる。**
+### なぜこれで解決するか
 
-- `stopPropagation()` により、イベントが TAO の `shortcutRegistry` に到達しない
+```
+DOM ツリー（外側 → 内側）:
+
+  .qti-item（テストランナー管理）
+    └── .qti-customInteraction
+          ← TAO の shortcutRegistry がここに登録
+        └── PCI ルート要素 (dom)
+              ← ★ ここで stopPropagation して遮断
+            └── カスタム入力要素 (contenteditable 等)
+
+keydown バブリング:
+  入力要素 → PCI root (★遮断) ╳→ TAO shortcutRegistry(到達しない)
+```
+
+- `stopPropagation()` により、イベントが TAO の shortcutRegistry に到達しない
 - TAO の `preventDefault()` も `keyboard()` も実行されない
-- PCI 側では `preventDefault()` を呼んでいないため、ネイティブ動作は維持される
+- PCI 側は `preventDefault()` を呼んでいないため、ネイティブ動作（カーソル移動等）は維持される
 
-### なぜこれで十分か
+### この対策のメリット
 
-```
-バブルフェーズの発火順:
-
-  PCI 内の入力要素  →  dom/PCI root  →  TAO shortcutRegistry
-                           ↑                    ↑
-                    stopPropagation()       到達しない
-                     ここで伝播停止
-```
-
-| 状況 | PCI ガード | TAO |
-|---|---|---|
-| 矢印キー（IME 中・外を問わず） | `stopPropagation` で遮断 | 到達しない |
-| Tab / Shift+Tab 等 | スルー | TAO が通常処理 |
-
-矢印キーかどうかだけを判定し、IME の状態は判定しない。目的は「矢印キーを TAO に渡さない」ことであり、IME の状態に関わらず矢印キーは PCI 内に留めるべきだからである。
+| メリット | 説明 |
+|---|---|
+| TAO のコード変更が不要 | PCI 側の変更だけで完結する |
+| 実装が最小限 | `initialize()` に 5 行追加するだけ |
+| 3 つの欠陥を一括回避 | イベントが TAO に到達しないため、全ての欠陥の影響を受けない |
+| IME の状態に依存しない | 矢印キーかどうかのみで判定するため、再現条件の不安定さに影響されない |
+| PCI 外に副作用なし | `stopPropagation` は PCI 内部から外への伝播のみ遮断 |
 
 ### 副作用の評価
 
-#### 問題が起きないもの
+**問題が起きないもの:**
 
 | 操作 | 理由 |
 |---|---|
-| PCI 内の contenteditable カーソル移動 | `preventDefault()` を呼んでいないため、ネイティブ動作は維持 |
-| PCI 内の `<select>`, `<input type="range">` 等 | 同上 |
-| Tab / Shift+Tab によるフォーカス移動 | 遮断対象に含めていないため通過 |
-| PCI **外** の TAO キーナビゲーション | `stopPropagation` は bubble 上方向のみ遮断。PCI 外には影響なし |
-| IME 中に `event.key === 'Process'` のケース | 矢印キーチェックに該当しないが、TAO の `getActualKey()` も同様にマッチしないため問題なし |
+| PCI 内のカーソル移動 | `preventDefault()` を呼んでいないため維持 |
+| PCI 内の `<select>`, `<input>` 等 | 同上 |
+| Tab / Shift+Tab のフォーカス移動 | 遮断対象外のため通過 |
+| PCI 外の TAO ナビゲーション | PCI 外には影響なし |
 
-#### 許容する副作用
+**許容する副作用:**
 
-| 副作用 | 影響度 | 対処 |
+| 副作用 | 影響度 | 備考 |
 |---|---|---|
-| PCI 内で TAO の矢印キーナビゲーションが無効になる | 低 | PCI が単一入力要素のみの場合は影響なし。複数要素がある場合は Tab キーで移動可能 |
-| TAO が将来矢印キーに新機能を追加した場合、PCI 内では使えない | 低 | 現時点では矢印キーは keyNavigation のみ。将来リスクとして認識 |
+| PCI 内での TAO 矢印キーナビゲーション無効化 | 低 | Tab キーで代替可能 |
+| TAO が将来矢印キーに新機能追加した場合 PCI 内で使えない | 低 | 将来リスクとして認識 |
 
 ---
 
-## 不採用とした PCI 側対策（参考）
+## 6. 不採用とした対策
 
-以下の対策も検討したが、いずれも3つの欠陥を完全には解決できないため不採用とした。
+### PCI 側の代替案
 
-### PCI対策B: CSS クラス `no-key-navigation` の付与
+| 対策 | 概要 | 不採用の理由 |
+|---|---|---|
+| **CSSクラス `no-key-navigation`** | TAO のナビゲーションアクションをブロック | `stopPropagation()` と `preventDefault()` は `processShortcut()` 内で先に実行されるため、ネイティブ動作は依然としてブロックされる |
+| **CSSクラス `key-navigation-scrollable`** | `preventDefault()` の回避 | `stopPropagation()` は依然として呼ばれ、`keyboard()` によるフォーカス移動も実行される |
+| **両者の組み合わせ** | 上記 2 つの併用 | `stopPropagation()` を回避できない |
 
-```javascript
-dom.classList.add('no-key-navigation');
-```
+### 対策比較表
 
-TAO の `allowedToNavigateFrom()` がナビゲーションアクションをブロックするが、**`stopPropagation()` と `preventDefault()` は `processShortcut()` 内で先に実行されるため、ネイティブ動作は依然としてブロックされる。**
-
-### PCI対策C: CSS クラス `key-navigation-scrollable` の付与
-
-```javascript
-inputElement.classList.add('key-navigation-scrollable');
-```
-
-`preventDefault()` は回避されるが、**`stopPropagation()` は依然として呼ばれ、`keyboard()` によるフォーカス移動も実行される。**
-
-### 対策比較
-
-| 対策 | TAO 変更 | preventDefault 回避 | stopPropagation 回避 | ナビゲーション停止 | IME 対応 |
+| 対策 | TAO変更 | preventDefault回避 | stopPropagation回避 | ナビゲーション停止 | IME対応 |
 |---|---|---|---|---|---|
-| **PCI 内 stopPropagation（採用）** | 不要 | **✓** | **✓** | **✓** | **✓** |
-| B: no-key-navigation | 不要 | ✗ | ✗ | ✓ | ✗ |
-| C: key-navigation-scrollable | 不要 | ✓ | ✗ | ✗ | ✗ |
-| B+C: 両方の組み合わせ | 不要 | ✓ | ✗ | ✓ | △ |
+| **PCI内 stopPropagation（採用）** | 不要 | **○** | **○** | **○** | **○** |
+| no-key-navigation | 不要 | × | × | ○ | × |
+| key-navigation-scrollable | 不要 | ○ | × | × | × |
+| 両方の組み合わせ | 不要 | ○ | × | ○ | △ |
+
+### keyNavigation プラグイン無効化との比較
+
+| 観点 | プラグイン無効化 | PCI 内 stopPropagation（採用） |
+|---|---|---|
+| TAO 側の設定変更 | **必要**（TAO 管理者依存） | 不要 |
+| PCI 開発者が制御可能か | いいえ | **はい** |
+| 影響範囲 | テスト全体のキーボードナビ喪失 | **矢印キーのみ、PCI 内のみ** |
+| アクセシビリティ（WCAG） | 準拠不可 | PCI 外は維持 |
+| TAO アップデート時の再設定リスク | あり | なし（PCI コードに内包） |
 
 ---
 
-## TAO コア変更を伴う妥協案（参考）
+## 7. TAO 開発元への改善提案（参考）
 
-TAO 開発元への改善要望として提案可能な案を以下にまとめる。自社 PCI では上記の採用対策で対応するが、TAO エコシステム全体の改善としてはこれらの変更が有効。
+自社 PCI は上記の採用対策で対応するが、TAO エコシステム全体の改善として以下を提案できる。
 
-### 妥協案1: `registry.js` に IME コンポジションガードを追加
-
-**変更箇所:** `tao-core-sdk-fe/src/util/shortcut/registry.js`
-
-```javascript
-function onKeyboard(event) {
-    if (event.isComposing || event.keyCode === 229) {
-        return;
-    }
-    processShortcut(event, { /* ... */ });
-}
-```
-
-- MDN 公式推奨パターンに準拠、変更は2行のみ
-- 全ショートカットで一括対応
-- デメリット: IME コンポジション中は Tab/Shift+Tab も無効になる
-
-### 妥協案2: `isInput()` の判定範囲を拡大
-
-**変更箇所:** `tao-core-ui-fe/src/keyNavigation/navigableDomElement.js`
-
-```javascript
-// 変更前
-const isInput = $el => $el.is(':text,textarea');
-
-// 変更後
-const isInput = $el =>
-    $el.is(':text,textarea,select,[contenteditable="true"]') ||
-    $el.closest('.qti-customInteraction').length > 0;
-```
-
-- PCI 内の全要素で矢印キーのネイティブ動作が許可される
-- デメリット: `stopPropagation()` は欠陥2により依然として実行される
-
-### 妥協案3: 妥協案1 + 妥協案2 の組み合わせ
-
-両方を適用する最も包括的なアプローチ。変更箇所が2ファイルに跨る。
-
-### 妥協案4: `keyNavigation` プラグインを無効化
-
-```php
-'keyNavigation' => ['active' => false]
-```
-
-コード変更不要で即効性があるが、アクセシビリティ機能（WCAG 対応）が完全に失われる。
-
-### 妥協案5: `stopPropagation` の実行タイミングを修正
-
-`processShortcut` でハンドラ実行後に `stopPropagation` を呼ぶよう変更。ハンドラの戻り値で制御可能にする。回帰リスクが高い。
-
-### TAO 改善要望としての優先度
-
-| 優先度 | 案 | リスク | 効果 |
+| 優先度 | 提案内容 | 変更箇所 | 概要 |
 |---|---|---|---|
-| ★★★ | 妥協案1: IME コンポジションガード | 低 | IME 問題を根本解決 |
-| ★★☆ | 妥協案2: isInput 拡大 | 中 | PCI 内操作を全般改善 |
-| ★★★ | 妥協案3: 1+2 の組合せ | 中 | 最も包括的 |
-| ★☆☆ | 妥協案4: プラグイン無効化 | 低 | 即効性あり（暫定対応） |
-| ☆☆☆ | 妥協案5: stopPropagation タイミング変更 | 高 | 根本的だが回帰リスク大 |
+| **高** | IME コンポジションガード追加 | `registry.js` | `event.isComposing \|\| event.keyCode === 229` のチェックを追加（2行） |
+| **高** | 上記 + isInput() 拡大の組合せ | `registry.js` + `navigableDomElement.js` | 最も包括的な修正 |
+| 中 | `isInput()` の判定範囲拡大 | `navigableDomElement.js` | `contenteditable` や PCI 内要素も入力欄として認識 |
+| 低 | keyNavigation プラグイン無効化 | PHP 設定ファイル | 即効性はあるがアクセシビリティ喪失 |
+| 非推奨 | stopPropagation タイミング変更 | `registry.js` | 根本修正だが回帰リスクが高い |
 
 ---
 
-## 参考リンク
+## 8. 調査対象ソースコード一覧
 
-- [MDN: Element keydown event - isComposing の推奨パターン](https://developer.mozilla.org/en-US/docs/Web/API/Element/keydown_event)
-- [Mozilla Bug #1529467 - Arrow keys during Hangul composition](https://bugzilla.mozilla.org/show_bug.cgi?id=1529467)
-- [Mozilla Bug #1343451 - keyCode 229 for IME events](https://bugzilla.mozilla.org/show_bug.cgi?id=1343451)
+| リポジトリ | ファイル | 役割 |
+|---|---|---|
+| `tao-core-sdk-fe` | `src/util/shortcut/registry.js` | ショートカットキー登録・検出基盤 |
+| `tao-core-ui-fe` | `src/keyNavigation/navigableDomElement.js` | DOM 要素レベルのキーイベント処理 |
+| `tao-test-runner-qti-fe` | `src/plugins/content/accessibility/keyNavigation/plugin.js` | キーナビゲーションプラグイン本体 |
+| `tao-test-runner-qti-fe` | `src/plugins/content/accessibility/keyNavigation/keyNavigation.js` | キーナビゲーション制御ロジック |
+| `tao-test-runner-qti-fe` | `src/plugins/content/accessibility/keyNavigation/helpers.js` | ナビゲーション判定ヘルパー |
+| `tao-test-runner-qti-fe` | `src/plugins/content/accessibility/keyNavigation/modes/defaultMode.js` | デフォルトモードキー設定 |
+| `tao-test-runner-qti-fe` | `src/plugins/content/accessibility/keyNavigation/strategies/itemNavigation.js` | アイテム内ナビゲーション戦略 |
+| `tao-test-runner-qti-fe` | `src/plugins/navigation/next.js` | 次問題ナビゲーション |
+| `extension-tao-testqti` | `config/default/testRunner.conf.php` | テストランナー設定 |
+
+## 9. 参考リンク
+
+- [MDN: Element keydown event](https://developer.mozilla.org/en-US/docs/Web/API/Element/keydown_event) - isComposing の推奨パターン
+- [Mozilla Bug #1529467](https://bugzilla.mozilla.org/show_bug.cgi?id=1529467) - IME コンポジション中の矢印キー挙動
+- [Mozilla Bug #1343451](https://bugzilla.mozilla.org/show_bug.cgi?id=1343451) - keyCode 229 の扱い
 - [IMS PCI Specification](https://www.imsglobal.org/sites/default/files/assessment/pciv1p0/pciv1p0.html)
 - [TAO PCI Developer Guide](https://github.com/oat-sa/taohub-articles/blob/master/forge/QTI/tao-pci.md)
-- [TAO Test Runner Plugins Wiki](https://github.com/oat-sa/extension-tao-testqti/wiki/Test-Runner-Plugins)
-- [TAO Test Runner Config Wiki](https://github.com/oat-sa/extension-tao-testqti/wiki/Test-Runner-Config)
-- [tao-test-runner-qti-fe リポジトリ](https://github.com/oat-sa/tao-test-runner-qti-fe)
-- [tao-core-ui-fe リポジトリ](https://github.com/oat-sa/tao-core-ui-fe)
-- [tao-core-sdk-fe リポジトリ](https://github.com/oat-sa/tao-core-sdk-fe)
-- [MDN: KeyboardEvent.keyCode (非推奨)](https://developer.mozilla.org/en-US/docs/Web/API/KeyboardEvent/keyCode)
+- [tao-test-runner-qti-fe](https://github.com/oat-sa/tao-test-runner-qti-fe)
+- [tao-core-ui-fe](https://github.com/oat-sa/tao-core-ui-fe)
+- [tao-core-sdk-fe](https://github.com/oat-sa/tao-core-sdk-fe)
