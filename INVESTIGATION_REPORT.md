@@ -6,12 +6,23 @@ TAO (Testing Assisté par Ordinateur) CBTシステムの受験画面（テスト
 
 ### 決定事項
 
-**PCI対策A（PCI ルート要素での `stopPropagation`）を採用する。**
+**PCI ルート要素での矢印キー `stopPropagation` を採用する。**
+
+PCI の `initialize()` メソッド冒頭で、矢印キーの keydown イベントが TAO 側へ伝播しないよう遮断する。
+
+```javascript
+dom.addEventListener('keydown', function(event) {
+    var arrowKeys = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
+    if (arrowKeys.indexOf(event.key) !== -1) {
+        event.stopPropagation();
+    }
+}, false);
+```
 
 - TAO のコード変更が不要
-- PCI の `initialize()` メソッドに数行追加するだけで完結
-- 矢印キーの `preventDefault`、`stopPropagation`、ナビゲーション実行を一括で回避
-- IME 使用時・非使用時ともに PCI 内の矢印キー操作が正常動作
+- PCI の `initialize()` に5行追加するだけで完結
+- TAO 側の全ての欠陥（`preventDefault`、`stopPropagation`、ナビゲーション実行）を一括で回避
+- `preventDefault()` を呼ばないため、PCI 内のネイティブ動作（カーソル移動等）は維持
 
 ---
 
@@ -186,11 +197,11 @@ TAO には既存の回避手段がいくつか存在するが、いずれも上�
 
 ---
 
-## 採用対策: PCI ルート要素での `stopPropagation`
+## 採用対策の詳細
 
 ### 方針
 
-PCI の `initialize()` メソッドで、PCI ルート要素（`dom`）に keydown リスナーを登録し、矢印キーイベントの上位への伝播を遮断する。TAO のハンドラはバブルフェーズ（`addEventListener(..., false)`）で PCI より外側の要素に登録されているため、PCI ルートで `stopPropagation()` を呼べば TAO のハンドラには到達しない。
+PCI の `initialize()` メソッド冒頭で、PCI ルート要素（`dom`）に keydown リスナーを登録し、矢印キーイベントの上位への伝播を遮断する。TAO のハンドラはバブルフェーズ（`addEventListener(..., false)`）で PCI より外側の要素に登録されているため、PCI ルートで `stopPropagation()` を呼べば TAO のハンドラには到達しない。
 
 ### イベント伝播の構造
 
@@ -219,41 +230,9 @@ keydown バブリング:
 ### 実装コード
 
 ```javascript
-// PCI の initialize() メソッド内
-initialize(id, dom, config, state) {
+initialize: function initialize(id, dom, config, state) {
 
-    // --- 自社 IME 入力要素の作成 ---
-    const imeInput = document.createElement('div');
-    imeInput.setAttribute('contenteditable', 'true');
-    imeInput.className = 'my-ime-input';
-    dom.appendChild(imeInput);
-
-    // ---------------------------------------------------------
-    // ① 自社 IME のキーハンドラ（入力要素に登録）
-    // ---------------------------------------------------------
-    let isComposing = false;
-
-    imeInput.addEventListener('compositionstart', function() {
-        isComposing = true;
-    });
-    imeInput.addEventListener('compositionend', function() {
-        isComposing = false;
-    });
-
-    imeInput.addEventListener('keydown', function(event) {
-        if (isComposing || event.isComposing || event.keyCode === 229) {
-            const arrowKeys = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
-            if (arrowKeys.includes(event.key)) {
-                handleIMECursorMove(event.key);
-                event.preventDefault();
-                return;
-            }
-        }
-    });
-
-    // ---------------------------------------------------------
-    // ② PCI root のガードハンドラ（TAO への伝播を遮断）
-    // ---------------------------------------------------------
+    // 矢印キーの TAO への伝播を遮断
     dom.addEventListener('keydown', function(event) {
         var arrowKeys = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
         if (arrowKeys.indexOf(event.key) !== -1) {
@@ -265,24 +244,29 @@ initialize(id, dom, config, state) {
 }
 ```
 
-### なぜ ① と ② が干渉しないか
+**この5行だけで、TAO 側の3つの欠陥を全て回避できる。**
+
+- `stopPropagation()` により、イベントが TAO の `shortcutRegistry` に到達しない
+- TAO の `preventDefault()` も `keyboard()` も実行されない
+- PCI 側では `preventDefault()` を呼んでいないため、ネイティブ動作は維持される
+
+### なぜこれで十分か
 
 ```
 バブルフェーズの発火順:
 
-  imeInput (①)  →  dom/PCI root (②)  →  TAO shortcutRegistry (③)
-     ↑                    ↑                      ↑
-  IME が処理        stopPropagation()         到達しない
-  preventDefault()   ここで伝播停止
+  PCI 内の入力要素  →  dom/PCI root  →  TAO shortcutRegistry
+                           ↑                    ↑
+                    stopPropagation()       到達しない
+                     ここで伝播停止
 ```
 
-`stopPropagation()` は上位要素への伝播を止めるが、同一要素・子要素のリスナーには影響しない。IME ハンドラ（①）は PCI ガード（②）より内側の要素に登録されるため、互いに干渉しない。
+| 状況 | PCI ガード | TAO |
+|---|---|---|
+| 矢印キー（IME 中・外を問わず） | `stopPropagation` で遮断 | 到達しない |
+| Tab / Shift+Tab 等 | スルー | TAO が通常処理 |
 
-| 状況 | ① IME ハンドラ | ② PCI ガード | ③ TAO |
-|---|---|---|---|
-| IME 中 + 矢印キー | IME がカーソル移動 + `preventDefault` | `stopPropagation` | 到達しない |
-| IME 外 + 矢印キー | スルー | `stopPropagation` | 到達しない |
-| IME 外 + Tab 等 | スルー | スルー | TAO が処理 |
+矢印キーかどうかだけを判定し、IME の状態は判定しない。目的は「矢印キーを TAO に渡さない」ことであり、IME の状態に関わらず矢印キーは PCI 内に留めるべきだからである。
 
 ### 副作用の評価
 
@@ -329,12 +313,10 @@ inputElement.classList.add('key-navigation-scrollable');
 
 | 対策 | TAO 変更 | preventDefault 回避 | stopPropagation 回避 | ナビゲーション停止 | IME 対応 |
 |---|---|---|---|---|---|
-| **A: PCI 内 stopPropagation（採用）** | 不要 | **✓** | **✓** | **✓** | **✓** |
+| **PCI 内 stopPropagation（採用）** | 不要 | **✓** | **✓** | **✓** | **✓** |
 | B: no-key-navigation | 不要 | ✗ | ✗ | ✓ | ✗ |
 | C: key-navigation-scrollable | 不要 | ✓ | ✗ | ✗ | ✗ |
 | B+C: 両方の組み合わせ | 不要 | ✓ | ✗ | ✓ | △ |
-
-**PCI 対策 A が唯一の完全な解決策。** イベントが TAO のハンドラに到達する前に止めるため、TAO 側の全ての欠陥を一括で回避できる。
 
 ---
 
