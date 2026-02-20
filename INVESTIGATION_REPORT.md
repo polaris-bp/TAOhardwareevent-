@@ -339,37 +339,116 @@ PCI (contenteditable):
 
 ## 9. GitHub 上の開発者のやりとり・推奨設定の調査
 
-### 調査範囲
+### 調査範囲と方法
 
-以下のリポジトリの Issue・Pull Request・Wiki・ディスカッションを調査した:
+以下のリポジトリの全 Pull Request（計 2,000 件超）を対象に、`keyNavigation`、`keyboard`、`arrow`、`PCI`、`shortcut`、`navigableDomElement`、`isInput`、`avoidInput`、`stopPropagation`、`IME`、`no-key-navigation`、`key-navigation-scrollable`、`allow-shortcuts` 等のキーワードで網羅的に検索した:
 
-- `oat-sa/tao-test-runner-qti-fe`
-- `oat-sa/tao-core-ui-fe`
-- `oat-sa/tao-core-sdk-fe`
+- `oat-sa/tao-test-runner-qti-fe`（548 PRs）
+- `oat-sa/tao-core-ui-fe`（689 PRs）
+- `oat-sa/tao-core-sdk-fe`（211 PRs）
 - `oat-sa/extension-tao-testqti`
 - `oat-sa/tao-core`
-- `openPCI/openPCIs`、`EJTH/open-tao-pcis`（外部 PCI プロジェクト）
-- TAO Community Forum（`forum.taotesting.com`）
+- `oat-sa/extension-tao-itemqti`
+- `oat-sa/tao-item-runner-qti-fe`
 
-### 調査結果: 公開 Issue・PR は存在しない
+**oat-sa 組織は GitHub Issues を使用しておらず、Jira（TAO-XXXX, TCA-XXX, ACTP-XXX, TR-XXX 等）で管理している。** そのため全ての技術的議論は PR の説明文とコミットメッセージに記録されている。
 
-**PCI 内で矢印キーが効かない問題を報告した公開 Issue・PR・ディスカッションは、いずれのリポジトリにも存在しなかった。**
+### 9.1 PCI とキーボードナビゲーションの衝突に直接関わる PR
 
-これは以下のいずれかを意味する:
+#### TR-84: PCI の keyNavigation インジケータ除外（2020年11月）
 
-- OAT 社の内部（非公開）Issue トラッカーで管理されている
-- PCI で IME を使うケースが一般的でなく、問題が報告されていない
-- 外部 PCI 開発者が TAO の keyNavigation 内部実装まで追跡する機会が少ない
+| リポジトリ | PR | 概要 |
+|---|---|---|
+| `tao-test-runner-qti-fe` | [#340](https://github.com/oat-sa/tao-test-runner-qti-fe/pull/340) | `.qti-customInteraction` を keyNavigation インジケータスタイルから除外 |
+| `tao-core-ui-fe` | [#216](https://github.com/oat-sa/tao-core-ui-fe/pull/216) | PCI が動的に DOM を削除した際の focusout 問題を MutationObserver で修正（Firefox 固有） |
+| `extension-tao-testqti` | [#1944](https://github.com/oat-sa/extension-tao-testqti/pull/1944) | 依存関係更新 |
 
-### 関連する唯一の公開情報: 2024-11 LTS リリースノート
+**意味:** OAT 社は PCI（`.qti-customInteraction`）を keyNavigation の視覚的なフォーカスインジケータから明示的に除外した。**PCI は TAO の keyNavigation にとって不透明なコンテナとして扱うべき** という設計意図が読み取れる。しかし、インジケータのスタイル除外だけであり、キーイベントの横取り（`stopPropagation`、`preventDefault`）は修正されていない。
 
-[TAO 2024-11 LTS リリースノート](https://userguide.taotesting.com/release-notes/latest/public/2024-11-lts) に以下の修正が含まれている:
+#### TAO-6409: CKEditor に `no-key-navigation` クラスを付与（2019年1月）
 
-> "Keyboard shortcuts were not usable for order interactions when using the new order single list mode."
+| リポジトリ | PR | 概要 |
+|---|---|---|
+| `extension-tao-itemqti` | [#1217](https://github.com/oat-sa/extension-tao-itemqti/pull/1217) | 拡張テキストの CKEditor コンテナに `no-key-navigation` クラスを付与 |
+| `extension-tao-testqti` | [#1369](https://github.com/oat-sa/extension-tao-testqti/pull/1369) | CKEditor ツールバー内の Tab キー動作修正 |
+| `tao-core` | [#1924](https://github.com/oat-sa/tao-core/pull/1924) | CKEditor ツールバーレイアウト修正 |
 
-これは Order インタラクションとキーボードショートカットの衝突修正であり、**キーボード操作とインタラクションの衝突が OAT 社内で認識されている問題カテゴリ** であることの根拠となる。ただし、PCI や矢印キーに直接言及したものではない。
+**意味:** TAO は拡張テキストインタラクション（XHTML モード）で CKEditor を使う際、keyNavigation との衝突を `no-key-navigation` クラスで回避した。**これは TAO 開発者自身が keyNavigation とリッチテキスト編集の衝突を認識し、CSS クラスベースの回避策を実装した前例** である。しかし、この回避策は PCI には適用されていない。
 
-### PCI 開発ドキュメントにキーボード対策の記述なし
+#### INF-209: キーボード選択時のバリデーション不備（2025年3月）
+
+| リポジトリ | PR | 概要 |
+|---|---|---|
+| `tao-item-runner-qti-fe` | [#424](https://github.com/oat-sa/tao-item-runner-qti-fe/pull/424) | Space キーによる選択時に maxChoices バリデーションが効かない問題を修正 |
+
+**意味:** 2025 年時点でもキーボード操作固有のバグが発見されており、キーボードイベント処理の網羅性に課題が残っていることを示す。
+
+### 9.2 keyNavigation の設計と進化
+
+keyNavigation プラグインは 2016 年から継続的に開発されている。以下は主要な設計変更の時系列である:
+
+| 時期 | Jira | PR | 変更内容 |
+|---|---|---|---|
+| 2016-10 | TAO-3251 | [extension-tao-testqti#622](https://github.com/oat-sa/extension-tao-testqti/pull/622) | `allow-shortcuts` オプション導入 |
+| 2016-11 | TAO-3398 | [extension-tao-testqti#653](https://github.com/oat-sa/extension-tao-testqti/pull/653) | `responsesAccess` プラグインを `keyNavigation` にリネーム |
+| 2017-02 | TAO-3738 | [tao-core#1175](https://github.com/oat-sa/tao-core/pull/1175) | `keyNavigator` ライブラリの初期実装 |
+| 2017-02 | TAO-3738 | [tao-core#1190](https://github.com/oat-sa/tao-core/pull/1190) | `navigableDomElement`・`navigableGroupElement` 概念の導入 |
+| 2017-03 | TAO-3946 | [extension-tao-testqti#773](https://github.com/oat-sa/extension-tao-testqti/pull/773) | 階層的キーナビゲーション |
+| 2019-01 | TAO-6409 | [extension-tao-itemqti#1217](https://github.com/oat-sa/extension-tao-itemqti/pull/1217) | CKEditor に `no-key-navigation` クラス適用 |
+| 2019-11 | TAO-9506 | [tao-test-runner-qti-fe#85](https://github.com/oat-sa/tao-test-runner-qti-fe/pull/85) | **`contentNavigatorType: 'native'` モード追加** |
+| 2020-03 | ACTP-297 | [tao-test-runner-qti-fe#139](https://github.com/oat-sa/tao-test-runner-qti-fe/pull/139), [#150](https://github.com/oat-sa/tao-test-runner-qti-fe/pull/150) | **プラグインをストラテジー/モード構成に大規模リファクタリング** |
+| 2020-04 | ACTP-429 | [tao-core-ui-fe#117](https://github.com/oat-sa/tao-core-ui-fe/pull/117), [tao-test-runner-qti-fe#159](https://github.com/oat-sa/tao-test-runner-qti-fe/pull/159) | **[破壊的変更] navigableDomElement にキーボード管理を移動、現行アーキテクチャ確立** |
+| 2020-05 | TCA-557 | [tao-test-runner-qti-fe#209](https://github.com/oat-sa/tao-test-runner-qti-fe/pull/209) | native モードで矢印キーをラジオボタン/リスト用に使用 |
+| 2020-06 | TCA-634 | [tao-core-ui-fe#144](https://github.com/oat-sa/tao-core-ui-fe/pull/144) | **`key-navigation-scrollable-*` CSS クラス導入** |
+| 2020-06 | TCA-595 | [tao-test-runner-qti-fe#224](https://github.com/oat-sa/tao-test-runner-qti-fe/pull/224) | WCAG 準拠のラジオボタン矢印キーナビゲーション |
+| 2020-11 | TR-84 | [tao-test-runner-qti-fe#340](https://github.com/oat-sa/tao-test-runner-qti-fe/pull/340) | **PCI を keyNavigation インジケータから除外** |
+
+### 9.3 `contentNavigatorType: 'native'` モード
+
+TAO-9506（2019年11月）で導入された設定で、keyNavigation のナビゲーションモードを変更できる:
+
+```php
+// config/taoQtiTest/testRunner.conf.php
+'keyNavigation' => array(
+    'contentNavigatorType' => 'native'  // 'default' | 'linear' | 'native'
+)
+```
+
+| モード | グループ間移動 | グループ内移動 | 矢印キーの用途 |
+|---|---|---|---|
+| `default` | Tab / Shift+Tab | **矢印キー** | フォーカス移動 |
+| `linear` | Tab / Shift+Tab | **矢印キー** | フォーカス移動 |
+| `native` | Tab / Shift+Tab | Tab / Shift+Tab | **ラジオボタン・リスト項目の選択のみ** |
+
+**`native` モードにすると、矢印キーはラジオボタンとリスト項目の選択にのみ使われ、一般的なフォーカス移動には Tab/Shift+Tab が使われる。**
+
+ただし、`native` モードでも `navigableDomElement` の矢印キーハンドラ自体は登録される。ラジオボタン内の矢印キーは WCAG 準拠の動作（TCA-595）として処理されるが、PCI 内の `contenteditable` 等に対する `isInput()` の判定問題は `native` モードでも変わらない。
+
+**本問題への影響: `native` モードは部分的に有効だが、完全な解決にはならない。**
+
+### 9.4 CSS クラスベースの回避策
+
+keyNavigation が提供する CSS クラスと、その導入経緯・PCI での有効性:
+
+| クラス名 | 導入 PR | 効果 | PCI での有効性 |
+|---|---|---|---|
+| `no-key-navigation` | TAO-6409 ([itemqti#1217](https://github.com/oat-sa/extension-tao-itemqti/pull/1217)) | `allowedToNavigateFrom()` → false、ナビゲーション停止 | **部分的** — `stopPropagation` と `preventDefault` は `processShortcut` 内で先に実行済みのため、ネイティブ動作はブロックされたまま |
+| `key-navigation-scrollable` | TCA-634 ([core-ui-fe#144](https://github.com/oat-sa/tao-core-ui-fe/pull/144)) | 全矢印キーの `preventDefault()` をスキップ | **部分的** — `stopPropagation` は依然として実行、`keyboard()` も呼ばれる |
+| `key-navigation-scrollable-up` | 同上 | 上・左矢印の `preventDefault()` をスキップ | 同上 |
+| `key-navigation-scrollable-down` | 同上 | 下・右矢印の `preventDefault()` をスキップ | 同上 |
+| `key-navigation-actionable` | 同上 | Enter キーの `preventDefault()` をスキップ | Enter キーのみ |
+
+**いずれの CSS クラスも PCI に自動付与されない。** また、PCI 開発者向けドキュメントにこれらのクラスの存在は記載されていない。
+
+### 9.5 テストランナー設定と本問題への影響
+
+| 設定項目 | デフォルト値 | 矢印キー問題への影響 | 根拠 |
+|---|---|---|---|
+| `allow-shortcuts` | `true` | **効果なし** | 矢印キーは要素別 registry で管理（第4章参照） |
+| `keyNavigation.contentNavigatorType` | `'default'` | **部分的** | `native` にするとフォーカス移動は Tab のみになるが、`isInput()` の問題は残る |
+| `keyNavigation` plugin `active` | `true` | **完全に解消** | プラグイン無効化でナビゲーション全体が停止。ただしアクセシビリティ喪失 |
+
+### 9.6 PCI 開発ドキュメントの状況
 
 | ドキュメント | URL | キーボード対策の記述 |
 |---|---|---|
@@ -378,49 +457,44 @@ PCI (contenteditable):
 | Test Runner Config Wiki | [extension-tao-testqti/wiki/Test-Runner-Config](https://github.com/oat-sa/extension-tao-testqti/wiki/Test-Runner-Config) | **なし** |
 | Test Runner Plugins Wiki | [extension-tao-testqti/wiki/Test-Runner-Plugins](https://github.com/oat-sa/extension-tao-testqti/wiki/Test-Runner-Plugins) | **なし** |
 
-PCI 開発者向けドキュメントには、キーボードイベントの処理方法、TAO の keyNavigation との共存方法、推奨する CSS クラス（`no-key-navigation` 等）の使用方法について**一切記載がない**。
+PCI 開発者向けドキュメントには、キーボードイベントの処理方法、TAO の keyNavigation との共存方法、推奨する CSS クラスの使用方法について**一切記載がない**。
 
-### テストランナー設定の推奨値
+### 9.7 keyNavigation プラグインの開発者・関係者情報
 
-TAO の `testRunner.conf.php` における関連設定と、本問題への影響:
-
-| 設定項目 | デフォルト値 | 矢印キー問題への影響 |
+| 人物 | 役割 | 主な PR |
 |---|---|---|
-| `allow-shortcuts` | `true` | **効果なし**（矢印キーは別 registry で管理） |
-| `keyNavigation.contentNavigatorType` | `'default'` | `'linear'` に変えても矢印キーの問題は変わらない |
-| `keyNavigation` plugin `active` | `true` | **`false` にすると矢印キー問題は解消するが、テスト全体のキーボードナビゲーションが失われる** |
+| Jean-Sebastien Conan (jsconan) | keyNavigation アーキテクト、プラグイン作者 | ACTP-297 リファクタリング、ACTP-429 破壊的変更、TCA-634 scrollable クラス、TCA-557/595 ラジオボタン改善 |
+| zagovorichev | 初期実装 | TAO-8693 初期ナビゲーション、TAO-8933 keyNavigation 修正 |
+| bziondik | native モード | TAO-9506 `contentNavigatorType: 'native'` |
+| btamas | PCI 対応 | TR-84 PCI インジケータ除外、focusout MutationObserver |
+| atsymuk | アクセシビリティ | TCA-665 KB ナビゲーション修正、TCA-590 ショートカットオーバーレイ |
+| ampaveliev | ツールメニュー | ACTP-410 ツールキーボードナビゲーション |
+| lecosson | カスタムナビゲーション | TR-199 フラットラジオ、TCA-741 ショートカット |
 
-### CSS クラスによる回避策
+### 9.8 GitHub 調査で判明しなかったこと
 
-TAO の keyNavigation が内部的に提供する CSS クラス:
+以下のキーワードで検索したが、**oat-sa の全リポジトリで該当する PR・Issue は 0 件** だった:
 
-| クラス名 | 効果 | PCI からの利用 |
+| 検索キーワード | 結果 | 意味 |
 |---|---|---|
-| `no-key-navigation` | `allowedToNavigateFrom()` が `false` を返す → ナビゲーションアクション停止 | **部分的に有効**（ただし `stopPropagation` と `preventDefault` は先に実行済み） |
-| `key-navigation-scrollable` | 矢印キーの `preventDefault()` をスキップ | **部分的に有効**（ただし `keyboard()` は実行される） |
-| `key-navigation-scrollable-up` | 上・左矢印の `preventDefault()` をスキップ | 同上 |
-| `key-navigation-scrollable-down` | 下・右矢印の `preventDefault()` をスキップ | 同上 |
-| `key-navigation-actionable` | Enter キーの `preventDefault()` をスキップ | Enter キーのみ |
+| `isInput` | 0 件 | `isInput()` の判定範囲の狭さは議論されたことがない |
+| `avoidInput` | 0 件 | `avoidInput` オプションの制限は議論されたことがない |
+| `stopPropagation keyboard` | 0 件 | `stopPropagation` のタイミング問題は議論されたことがない |
+| `IME` | 0 件 | IME コンポジションとの衝突は認識されていない |
+| `allowedToNavigateFrom` | 0 件 | この関数の制限は議論されたことがない |
+| `PCI keyboard` | 0 件 | PCI 内のキーボード問題は報告されたことがない |
 
-**いずれの CSS クラスも PCI に自動付与されない。** PCI 開発者が明示的に付与する必要があるが、これらのクラスの存在自体がドキュメント化されていない。
+### 9.9 この調査からの総合的示唆
 
-### keyNavigation プラグインの開発者情報
+1. **OAT 社は keyNavigation とインタラクションの衝突を認識している** — CKEditor への `no-key-navigation` 付与（TAO-6409）、PCI のインジケータ除外（TR-84）、`key-navigation-scrollable-*` クラスの導入（TCA-634）など、衝突を回避する仕組みを複数実装している
 
-| 項目 | 内容 |
-|---|---|
-| プラグイン ID | `keyNavigation` |
-| 正式名 | Keyboard Navigation |
-| カテゴリ | content（accessibility） |
-| 作者 | Jean-Sebastien Conan (jean-sebastien@taotesting.com) |
-| タグ | `core`, `qti` |
-| 登録スクリプト | [RegisterTestRunnerPlugins.php](https://github.com/oat-sa/extension-tao-testqti/blob/master/scripts/install/RegisterTestRunnerPlugins.php) |
+2. **しかし PCI に対する保護は不完全** — 視覚インジケータの除外（TR-84）は行ったが、キーイベントの横取りは修正していない。`no-key-navigation` クラスは CKEditor にのみ適用され、PCI には適用も案内もされていない
 
-### この調査からの示唆
+3. **IME・`isInput()`・`stopPropagation` タイミングの問題は未認識** — これらのキーワードでの検索結果が 0 件であることから、本報告書で指摘する 3 つの欠陥は OAT 社内で認識されていないと判断できる
 
-1. **本問題は公的に未報告** — TAO エコシステム全体に影響する問題だが、日本語 IME を PCI 内で使うケースが世界的に稀であるため表面化していない可能性が高い
-2. **PCI 開発者への情報提供が不足** — TAO の keyNavigation との共存に関するガイダンスが公式ドキュメントに存在しない
-3. **TAO 側の保護は標準インタラクション限定** — `<textarea>` や CKEditor には保護があるが、PCI には適用されていない
-4. **OAT 社はキーボード衝突を認識** — 2024-11 LTS で Order インタラクションの衝突を修正しており、類似問題の報告は受け入れられる可能性がある
+4. **`contentNavigatorType: 'native'` は有力な緩和策** — TAO-9506 で導入された設定で、矢印キーの用途をラジオボタン・リスト選択に限定できる。ただし `isInput()` の問題は残るため完全な解決にはならない
+
+5. **PCI 開発者への情報提供が著しく不足** — TAO の keyNavigation との共存に関するガイダンスが公式ドキュメントに存在せず、`no-key-navigation` 等の CSS クラスの存在も文書化されていない
 
 ---
 
@@ -443,6 +517,28 @@ TAO の keyNavigation が内部的に提供する CSS クラス:
 
 ## 11. 参考リンク
 
+### 本報告書で参照した主要 PR（oat-sa GitHub）
+
+#### PCI・キーボード衝突
+- [tao-test-runner-qti-fe#340](https://github.com/oat-sa/tao-test-runner-qti-fe/pull/340) - TR-84: PCI を keyNavigation インジケータから除外
+- [tao-core-ui-fe#216](https://github.com/oat-sa/tao-core-ui-fe/pull/216) - TR-84: PCI の focusout MutationObserver 修正
+- [extension-tao-itemqti#1217](https://github.com/oat-sa/extension-tao-itemqti/pull/1217) - TAO-6409: CKEditor に `no-key-navigation` クラス付与
+- [tao-item-runner-qti-fe#424](https://github.com/oat-sa/tao-item-runner-qti-fe/pull/424) - INF-209: キーボード選択時バリデーション修正（2025年）
+
+#### keyNavigation アーキテクチャ
+- [tao-core#1175](https://github.com/oat-sa/tao-core/pull/1175) - TAO-3738: keyNavigator 初期実装
+- [tao-core#1190](https://github.com/oat-sa/tao-core/pull/1190) - navigableDomElement 概念導入
+- [tao-core-ui-fe#117](https://github.com/oat-sa/tao-core-ui-fe/pull/117) - ACTP-429: [破壊的] 現行アーキテクチャ確立
+- [tao-test-runner-qti-fe#139](https://github.com/oat-sa/tao-test-runner-qti-fe/pull/139) - ACTP-297: プラグインリファクタリング第1フェーズ
+- [tao-test-runner-qti-fe#150](https://github.com/oat-sa/tao-test-runner-qti-fe/pull/150) - ACTP-297: ストラテジー/モード構成導入
+
+#### ナビゲーションモード・設定
+- [tao-test-runner-qti-fe#85](https://github.com/oat-sa/tao-test-runner-qti-fe/pull/85) - TAO-9506: `contentNavigatorType: 'native'` 追加
+- [tao-test-runner-qti-fe#209](https://github.com/oat-sa/tao-test-runner-qti-fe/pull/209) - TCA-557: native モードでの矢印キー動作
+- [tao-test-runner-qti-fe#224](https://github.com/oat-sa/tao-test-runner-qti-fe/pull/224) - TCA-595: WCAG ラジオボタンナビゲーション
+- [tao-core-ui-fe#144](https://github.com/oat-sa/tao-core-ui-fe/pull/144) - TCA-634: `key-navigation-scrollable-*` CSS クラス導入
+- [extension-tao-testqti#622](https://github.com/oat-sa/extension-tao-testqti/pull/622) - TAO-3251: `allow-shortcuts` オプション導入
+
 ### TAO ソースコード・ドキュメント
 - [tao-test-runner-qti-fe](https://github.com/oat-sa/tao-test-runner-qti-fe) - テストランナー（keyNavigation プラグイン含む）
 - [tao-core-ui-fe](https://github.com/oat-sa/tao-core-ui-fe) - コア UI（navigableDomElement 含む）
@@ -452,7 +548,7 @@ TAO の keyNavigation が内部的に提供する CSS クラス:
 - [Test Runner Plugins Wiki](https://github.com/oat-sa/extension-tao-testqti/wiki/Test-Runner-Plugins) - プラグイン一覧
 - [PCI Development Guide](https://github.com/oat-sa/taohub-articles/blob/master/forge/pci-development.md) - PCI 開発ガイド
 - [TAO PCI Specification](https://github.com/oat-sa/taohub-articles/blob/master/forge/QTI/tao-pci.md) - TAO PCI 仕様
-- [RegisterTestRunnerPlugins.php](https://github.com/oat-sa/extension-tao-testqti/blob/master/scripts/install/RegisterTestRunnerPlugins.php) - プラグイン登録スクリプト
+- [RegisterTestRunnerPlugins.php](https://github.com/oat-sa/extension-tao-testqti/blob/master/scripts/install/RegisterTestRunnerPlugins.php) - プラグイン登録
 
 ### TAO リリースノート・ユーザーガイド
 - [TAO 2024-11 LTS Release Notes](https://userguide.taotesting.com/release-notes/latest/public/2024-11-lts) - Order インタラクションのキーボード修正
