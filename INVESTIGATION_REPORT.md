@@ -178,18 +178,45 @@ const isInput = $el => $el.is(':text,textarea');
 
 ---
 
-### 補足: ワークアラウンドが効かない理由
+### 補足: TAO 側のショートカット設定について
 
-TAO には既存の回避手段がいくつか存在するが、いずれも上記3つの欠陥を完全には解決しない。
+CBT システム側で「ショートカット設定をオフ」にした場合、矢印キーが正常に動作することが確認されている。これは以下のいずれかのメカニズムによると推定される。
 
-#### `allow-shortcuts: false` が効かない理由
+#### メカニズム A: `shortcutRegistry` のグローバル無効化
 
-`keyNavigation` プラグインはショートカット登録時に `allowShortcuts` 設定をチェックしない。他のプラグイン（`next.js` 等）はチェックしているため、`allow-shortcuts: false` にすると J/K/C 等は無効になるが、**矢印キーのインターセプトは残る。**
+`registry.js` の `processShortcut` は `states.disabled` フラグをチェックする:
 
-| 設定 | J/K/C 等 | keyNavigation（矢印キー） |
+```javascript
+if (shortcut && !states.disabled) {  // disabled なら全処理をスキップ
+    event.stopPropagation();         // ← 実行されない
+    // ...
+}
+```
+
+ショートカット設定をオフにすると、上位コンポーネントが `shortcutRegistry.disable()` を呼び、`states.disabled = true` が設定される可能性がある。この場合、`processShortcut` の全処理（`stopPropagation`・`preventDefault`・ハンドラ実行）がスキップされるため、矢印キーはネイティブ動作する。
+
+なお、`keyNavigation` プラグイン自体は `allowShortcuts` 設定を自前でチェックしていないが、**registry のグローバル無効化により間接的に無効化される。**
+
+#### メカニズム B: keyNavigation プラグインの非活性化
+
+テストランナー設定で keyNavigation プラグインが非活性化された場合:
+
+```php
+'keyNavigation' => ['active' => false]
+```
+
+プラグインがロードされないため、矢印キーの shortcutRegistry 登録自体が行われない。
+
+#### ショートカット設定オフでは不十分な理由
+
+いずれのメカニズムであっても、ショートカット設定オフは PCI の対策としては採用しない:
+
+| 観点 | ショートカット設定オフ | PCI 内 `stopPropagation` |
 |---|---|---|
-| `allow-shortcuts: true` | 有効 | 有効（インターセプト） |
-| `allow-shortcuts: false` | **無効** | **依然として有効** |
+| TAO 側の設定変更 | **必要**（TAO 管理者依存） | 不要 |
+| PCI 開発者が制御可能か | いいえ | **はい** |
+| 影響範囲 | 全ショートカット無効 | **矢印キーのみ、PCI 内のみ** |
+| アクセシビリティ影響 | TAO 全体のキーボードナビ喪失 | PCI 外は維持 |
 
 #### `avoidInput` オプションが効かない理由
 
